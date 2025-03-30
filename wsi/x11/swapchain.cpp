@@ -55,6 +55,7 @@
 #include "util/macros.hpp"
 #include "wsi/external_memory.hpp"
 #include "wsi/swapchain_base.hpp"
+#include <wsi/extensions/present_id.hpp>
 
 namespace wsi
 {
@@ -601,7 +602,8 @@ void swapchain::present_event_thread()
                                         });
                if (iter != data->pending_completions.end())
                {
-                  set_present_id(iter->present_id);
+                  auto *ext = get_swapchain_extension<wsi_ext_present_id>(true);
+                  ext->set_present_id(iter->present_id);
                   data->pending_completions.erase(iter);
                   m_thread_status_cond.notify_all();
                }
@@ -627,7 +629,8 @@ void swapchain::present_image(const pending_present_request &pending_present)
    {
       if (!m_present_event_thread_run)
       {
-         set_present_id(pending_present.present_id);
+         auto *ext = get_swapchain_extension<wsi_ext_present_id>(true);
+         ext->set_present_id(pending_present.present_id);
          return unpresent_image(pending_present.image_index);
       }
       m_thread_status_cond.wait(thread_status_lock);
