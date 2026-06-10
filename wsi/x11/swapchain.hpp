@@ -36,6 +36,11 @@ struct x11_image_data
 
    VkDevice device = VK_NULL_HANDLE;
    layer::device_private_data *device_data = nullptr;
+
+   VkImage optimal_image = VK_NULL_HANDLE;
+   VkDeviceMemory optimal_memory = VK_NULL_HANDLE;
+   VkImage linear_image = VK_NULL_HANDLE;
+   VkCommandBuffer copy_cmd = VK_NULL_HANDLE;
 };
 
 class swapchain : public wsi::swapchain_base
@@ -76,6 +81,8 @@ private:
    std::mutex m_present_mutex;
    std::condition_variable m_present_cond;
    uint32_t m_outstanding_pixmaps = 0;
+
+   VkCommandPool m_command_pool = VK_NULL_HANDLE;
 };
 
 } /* namespace x11 */

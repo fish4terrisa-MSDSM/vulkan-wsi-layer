@@ -219,6 +219,7 @@ static constexpr uint32_t API_VERSION_MAX = UINT32_MAX;
    EP(GetInstanceProcAddr, "", VK_API_VERSION_1_0, true)                                                             \
    EP(DestroyInstance, "", VK_API_VERSION_1_0, true)                                                                 \
    EP(GetPhysicalDeviceProperties, "", VK_API_VERSION_1_0, true)                                                     \
+   EP(GetPhysicalDeviceMemoryProperties, "", VK_API_VERSION_1_0, true)                                               \
    EP(GetPhysicalDeviceImageFormatProperties, "", VK_API_VERSION_1_0, true)                                          \
    EP(EnumerateDeviceExtensionProperties, "", VK_API_VERSION_1_0, true)                                              \
    /* VK_KHR_surface */                                                                                              \
@@ -363,6 +364,8 @@ private:
 
 #define DEVICE_ENTRYPOINTS_LIST(EP)                                                                                \
    /* Vulkan 1.0 */                                                                                                \
+   EP(CmdCopyImage, "", VK_API_VERSION_1_0, true)                                                                  \
+   EP(CmdPipelineBarrier, "", VK_API_VERSION_1_0, true)                                                            \
    EP(GetDeviceProcAddr, "", VK_API_VERSION_1_0, true)                                                             \
    EP(GetDeviceQueue, "", VK_API_VERSION_1_0, true)                                                                \
    EP(QueueSubmit, "", VK_API_VERSION_1_0, true)                                                                   \

@@ -6,6 +6,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <linux/dma-heap.h>
+#include <algorithm>
 
 #include <util/timed_semaphore.hpp>
 #include <vulkan/vulkan_core.h>
@@ -67,7 +68,6 @@ swapchain::~swapchain()
       m_present_cond.notify_all();
    }
 
-   /* Wake up xcb_wait_for_special_event by requesting an immediate vblank notification */
    if (m_connection && m_window && m_special_event) {
       xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
       xcb_flush(m_connection);
@@ -87,6 +87,11 @@ swapchain::~swapchain()
       m_event_id = 0;
    }
    xcb_flush(m_connection);
+
+   if (m_command_pool != VK_NULL_HANDLE) {
+      m_device_data.disp.DestroyCommandPool(m_device, m_command_pool, get_allocation_callbacks());
+      m_command_pool = VK_NULL_HANDLE;
+   }
 
    teardown();
 }
@@ -150,6 +155,18 @@ VkResult swapchain::create_swapchain_image(VkImageCreateInfo image_create_info, 
    image_data->device = m_device;
    image_data->device_data = &m_device_data;
 
+   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+   image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+   image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+   VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to create optimal swapchain image");
+      return res;
+   }
+   image_data->optimal_image = image.image;
+
    m_image_create_info = image_create_info;
    return VK_SUCCESS;
 }
@@ -158,28 +175,71 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
 {
    std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
    image.status = swapchain_image::FREE;
+   assert(image.data != nullptr);
    auto image_data = static_cast<x11_image_data *>(image.data);
    image_status_lock.unlock();
+
+   VkMemoryRequirements reqs;
+   m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->optimal_image, &reqs);
+
+   VkPhysicalDeviceMemoryProperties mem_props;
+   m_device_data.instance_data.disp.GetPhysicalDeviceMemoryProperties(m_device_data.physical_device, &mem_props);
+   uint32_t mem_type_idx = UINT32_MAX;
+   for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+      if ((reqs.memoryTypeBits & (1 << i)) && 
+          (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+         mem_type_idx = i;
+         break;
+      }
+   }
+   if (mem_type_idx == UINT32_MAX) {
+      for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+         if (reqs.memoryTypeBits & (1 << i)) {
+            mem_type_idx = i;
+            break;
+         }
+      }
+   }
+
+   VkMemoryAllocateInfo mem_info = {};
+   mem_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+   mem_info.allocationSize = reqs.size;
+   mem_info.memoryTypeIndex = mem_type_idx;
+
+   VkResult res = m_device_data.disp.AllocateMemory(m_device, &mem_info, get_allocation_callbacks(), &image_data->optimal_memory);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to allocate memory for optimal image");
+      return res;
+   }
+
+   res = m_device_data.disp.BindImageMemory(m_device, image_data->optimal_image, image_data->optimal_memory, 0);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to bind memory to optimal image");
+      return res;
+   }
+
+   VkImageCreateInfo linear_info = image_create_info;
+   linear_info.tiling = VK_IMAGE_TILING_LINEAR;
+   linear_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
    VkExternalMemoryImageCreateInfoKHR ext_info = {};
    ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
    ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-   ext_info.pNext = image_create_info.pNext;
-   
-   image_create_info.pNext = &ext_info;
-   image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+   ext_info.pNext = linear_info.pNext;
+   linear_info.pNext = &ext_info;
 
-   VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
+   res = m_device_data.disp.CreateImage(m_device, &linear_info, get_allocation_callbacks(), &image_data->linear_image);
    if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to create VK_IMAGE_TILING_LINEAR swapchain image");
+      WSI_LOG_ERROR("Failed to create linear presentation image");
       return res;
    }
 
-   VkMemoryRequirements reqs;
-   m_device_data.disp.GetImageMemoryRequirements(m_device, image.image, &reqs);
+   VkMemoryRequirements linear_reqs;
+   m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->linear_image, &linear_reqs);
 
-   int dma_buf_fd = alloc_dma_heap(reqs.size);
+   int dma_buf_fd = alloc_dma_heap(linear_reqs.size);
    if (dma_buf_fd < 0) {
+      WSI_LOG_ERROR("Failed to allocate DMA heap memory");
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
@@ -188,14 +248,15 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    image_data->external_mem.set_format_info(false, 1);
    image_data->external_mem.set_memory_handle_type(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
 
-   res = image_data->external_mem.import_memory_and_bind_swapchain_image(image.image);
+   res = image_data->external_mem.import_memory_and_bind_swapchain_image(image_data->linear_image);
    if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to import memory and bind linear image");
       return res;
    }
 
    VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
    VkSubresourceLayout layout;
-   m_device_data.disp.GetImageSubresourceLayout(m_device, image.image, &subres, &layout);
+   m_device_data.disp.GetImageSubresourceLayout(m_device, image_data->linear_image, &subres, &layout);
 
    uint32_t width = image_create_info.extent.width;
    uint32_t height = image_create_info.extent.height;
@@ -209,14 +270,116 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
 
    res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
    if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to create DRI3 image resources");
       return res;
    }
 
-   auto present_fence = sync_fd_fence_sync::create(m_device_data);
-   if (!present_fence.has_value()) {
+   auto present_fence = fence_sync::create(m_device_data);
+   if (!present_fence.has_value())
+   {
+      WSI_LOG_ERROR("Failed to create presentation fence");
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
    image_data->present_fence = std::move(present_fence.value());
+
+   if (m_command_pool == VK_NULL_HANDLE) {
+      VkCommandPoolCreateInfo pool_info = {};
+      pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+      pool_info.queueFamilyIndex = 0;
+      pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+      res = m_device_data.disp.CreateCommandPool(m_device, &pool_info, get_allocation_callbacks(), &m_command_pool);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to create command pool");
+         return res;
+      }
+   }
+
+   VkCommandBufferAllocateInfo cmd_alloc = {};
+   cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+   cmd_alloc.commandPool = m_command_pool;
+   cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+   cmd_alloc.commandBufferCount = 1;
+   res = m_device_data.disp.AllocateCommandBuffers(m_device, &cmd_alloc, &image_data->copy_cmd);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to allocate copy command buffer");
+      return res;
+   }
+
+   VkCommandBufferBeginInfo begin_info = {};
+   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+   res = m_device_data.disp.BeginCommandBuffer(image_data->copy_cmd, &begin_info);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to begin command buffer");
+      return res;
+   }
+
+   VkImageMemoryBarrier barrier_src = {};
+   barrier_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+   barrier_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+   barrier_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+   barrier_src.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+   barrier_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   barrier_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier_src.image = image_data->optimal_image;
+   barrier_src.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+   VkImageMemoryBarrier barrier_dst = {};
+   barrier_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+   barrier_dst.srcAccessMask = 0;
+   barrier_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+   barrier_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   barrier_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+   barrier_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+   barrier_dst.image = image_data->linear_image;
+   barrier_dst.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+
+   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+
+   VkImageCopy copy_region = {};
+   copy_region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+   copy_region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+   copy_region.extent = { width, height, 1 };
+
+   m_device_data.disp.CmdCopyImage(image_data->copy_cmd,
+                                   image_data->optimal_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   image_data->linear_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   1, &copy_region);
+
+   barrier_src.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+   barrier_src.dstAccessMask = 0;
+   barrier_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   barrier_src.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+   barrier_dst.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+   barrier_dst.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+   barrier_dst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+   barrier_dst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                         0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+
+   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                         0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+
+   res = m_device_data.disp.EndCommandBuffer(image_data->copy_cmd);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to end command buffer");
+      return res;
+   }
 
    return VK_SUCCESS;
 }
@@ -297,6 +460,8 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
       image.status = wsi::swapchain_image::INVALID;
    }
 
+   image_status_lock.unlock();
+
    if (image.data != nullptr)
    {
       auto data = reinterpret_cast<x11_image_data *>(image.data);
@@ -304,6 +469,21 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
       if (data != nullptr && m_dri3_presenter)
       {
          m_dri3_presenter->destroy_image_resources(data);
+      }
+
+      if (data->linear_image != VK_NULL_HANDLE) {
+         m_device_data.disp.DestroyImage(m_device, data->linear_image, get_allocation_callbacks());
+         data->linear_image = VK_NULL_HANDLE;
+      }
+
+      if (data->optimal_memory != VK_NULL_HANDLE) {
+         m_device_data.disp.FreeMemory(m_device, data->optimal_memory, get_allocation_callbacks());
+         data->optimal_memory = VK_NULL_HANDLE;
+      }
+
+      if (data->copy_cmd != VK_NULL_HANDLE && m_command_pool != VK_NULL_HANDLE) {
+         m_device_data.disp.FreeCommandBuffers(m_device, m_command_pool, 1, &data->copy_cmd);
+         data->copy_cmd = VK_NULL_HANDLE;
       }
 
       m_allocator.destroy(1, data);
@@ -318,7 +498,38 @@ VkResult swapchain::image_set_present_payload(swapchain_image &image, VkQueue qu
    if (data == nullptr) {
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
-   return data->present_fence.set_payload(queue, semaphores, submission_pnext);
+
+   util::vector<VkPipelineStageFlags> wait_stages{ util::allocator(
+      m_allocator, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND) };
+   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+   const VkPipelineStageFlags *wait_stage_data = &wait_stage;
+   if (semaphores.wait_semaphores_count > 1) {
+      if (wait_stages.try_resize(semaphores.wait_semaphores_count)) {
+         std::fill(wait_stages.begin(), wait_stages.end(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+         wait_stage_data = wait_stages.data();
+      }
+   }
+
+   VkSubmitInfo submit_info = {};
+   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   submit_info.waitSemaphoreCount = semaphores.wait_semaphores_count;
+   submit_info.pWaitSemaphores = semaphores.wait_semaphores;
+   submit_info.pWaitDstStageMask = wait_stage_data;
+   submit_info.commandBufferCount = 1;
+   submit_info.pCommandBuffers = &data->copy_cmd;
+   submit_info.signalSemaphoreCount = semaphores.signal_semaphores_count;
+   submit_info.pSignalSemaphores = semaphores.signal_semaphores;
+
+   VkResult res = m_device_data.disp.QueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+   if (res != VK_SUCCESS) {
+      WSI_LOG_ERROR("Failed to submit copy command buffer: %d", res);
+      return res;
+   }
+
+   queue_submit_semaphores fence_semaphores = {
+      semaphores.signal_semaphores, semaphores.signal_semaphores_count, nullptr, 0
+   };
+   return data->present_fence.set_payload(queue, fence_semaphores, submission_pnext);
 }
 
 VkResult swapchain::image_wait_present(swapchain_image &image, uint64_t timeout)
@@ -333,13 +544,13 @@ VkResult swapchain::image_wait_present(swapchain_image &image, uint64_t timeout)
 VkResult swapchain::bind_swapchain_image(VkDevice &device, const VkBindImageMemoryInfo *bind_image_mem_info,
                                          const VkBindImageMemorySwapchainInfoKHR *bind_sc_info)
 {
-   UNUSED(device);
+   auto &device_data = layer::device_private_data::get(device);
    const wsi::swapchain_image &swapchain_image = m_swapchain_images[bind_sc_info->imageIndex];
    auto image_data = reinterpret_cast<x11_image_data *>(swapchain_image.data);
    if (image_data == nullptr) {
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
-   return image_data->external_mem.bind_swapchain_image_memory(bind_image_mem_info->image);
+   return device_data.disp.BindImageMemory(device, bind_image_mem_info->image, image_data->optimal_memory, 0);
 }
 
 VkResult swapchain::add_required_extensions(VkDevice device, const VkSwapchainCreateInfoKHR *swapchain_create_info)
