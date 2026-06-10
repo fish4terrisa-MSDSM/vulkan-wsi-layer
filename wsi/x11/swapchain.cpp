@@ -13,6 +13,7 @@
 #include <xcb/dri3.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <xcb/present.h>
 
 #include "swapchain.hpp"
 #include "util/log.hpp"
@@ -59,8 +60,21 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
 
 swapchain::~swapchain()
 {
-   m_page_flip_thread_run = false;
-   m_page_flip_semaphore.post();
+   m_present_event_thread_run = false;
+   if (m_special_event) {
+      xcb_unregister_for_special_event(m_connection, m_special_event);
+      m_special_event = nullptr;
+   }
+   if (m_event_id) {
+      xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
+      m_event_id = 0;
+   }
+   xcb_flush(m_connection);
+
+   if (m_present_event_thread.joinable())
+   {
+      m_present_event_thread.join();
+   }
 
    teardown();
 }
@@ -83,7 +97,32 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
    }
 
    m_dri3_presenter = std::move(dri3);
+
+   const xcb_query_extension_reply_t *ext = xcb_get_extension_data(m_connection, &xcb_present_id);
+   if (!ext || !ext->present) {
+      WSI_LOG_ERROR("x11 swapchain: Present extension not available");
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+
+   m_event_id = xcb_generate_id(m_connection);
+   xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_IDLE_NOTIFY | XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY);
+   m_special_event = xcb_register_for_special_xge(m_connection, &xcb_present_id, m_event_id, nullptr);
+
+   if (!m_special_event) {
+      WSI_LOG_ERROR("x11 swapchain: Failed to register for special event");
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+
    WSI_LOG_INFO("x11 swapchain: Successfully initialized termux-x11 DRI3 presenter");
+
+   try
+   {
+      m_present_event_thread = std::thread(&swapchain::present_event_thread, this);
+   }
+   catch (...)
+   {
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
    return VK_SUCCESS;
 }
@@ -116,8 +155,8 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    
    image_create_info.pNext = &ext_info;
    
-   // Termux-X11 strictly requires LINEAR tiling because it mmap()s the FD and 
-   // calls glTexSubImage2D on the CPU memory directly.
+   // Termux-X11 strictly requires LINEAR tiling because it mmap()s the FD 
+   // and calls glTexSubImage2D on the CPU memory directly.
    image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
@@ -178,12 +217,39 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    return VK_SUCCESS;
 }
 
+void swapchain::present_event_thread()
+{
+   m_present_event_thread_run = true;
+
+   while (m_present_event_thread_run)
+   {
+      xcb_generic_event_t *event = xcb_wait_for_special_event(m_connection, m_special_event);
+      if (!event) break;
+
+      auto *ge = (xcb_present_generic_event_t *)event;
+      if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
+         auto *idle = (xcb_present_idle_notify_event_t *)event;
+
+         // Find the image bound to this pixmap and unpresent it
+         for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
+            auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
+            if (image_data->pixmap == idle->pixmap) {
+               unpresent_image(i); // Marks it FREE and posts the semaphore
+               break;
+            }
+         }
+      }
+
+      free(event);
+   }
+}
+
 void swapchain::present_image(const pending_present_request &pending_present)
 {
    auto image_data = reinterpret_cast<x11_image_data *>(m_swapchain_images[pending_present.image_index].data);
    
    // Send to termux-x11 directly. XCB_PRESENT_OPTION_COPY makes the server copy immediately.
-   VkResult present_result = m_dri3_presenter->present_image(image_data, 0);
+   VkResult present_result = m_dri3_presenter->present_image(image_data, 0, m_present_mode);
 
    if (present_result != VK_SUCCESS) {
       WSI_LOG_ERROR("Failed to present image using DRI3: %d", present_result);
@@ -195,8 +261,8 @@ void swapchain::present_image(const pending_present_request &pending_present)
       ext->set_present_id(pending_present.present_id);
    }
 
-   // Because of OPTION_COPY, the image is immediately available for reuse by Vulkan.
-   unpresent_image(pending_present.image_index);
+   // No unpresent_image here anymore! 
+   // It is now strictly handled by IDLE_NOTIFY in present_event_thread.
 }
 
 void swapchain::destroy_image(wsi::swapchain_image &image)

@@ -106,7 +106,7 @@ VkResult dri3_presenter::create_image_resources(x11_image_data *image_data, uint
    return VK_SUCCESS;
 }
 
-VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t serial)
+VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t serial, VkPresentModeKHR present_mode)
 {
    UNUSED(serial);
 
@@ -117,11 +117,16 @@ VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t seri
 
    m_present_serial++;
 
-   /* termux-x11 optimizes XCB_PRESENT_OPTION_COPY, allowing instantaneous presentation
-    * and eliminating the need for trailing IDLE_NOTIFY tracking loop blocks. */
+   uint32_t options = XCB_PRESENT_OPTION_NONE;
+   if (present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ||
+       present_mode == VK_PRESENT_MODE_MAILBOX_KHR ||
+       present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
+      options |= XCB_PRESENT_OPTION_ASYNC;
+   }
+
    xcb_present_pixmap(m_connection, m_window, image_data->pixmap, m_present_serial,
                       XCB_NONE, XCB_NONE, 0, 0, XCB_NONE, XCB_NONE, XCB_NONE,
-                      XCB_PRESENT_OPTION_COPY, 0, 0, 0, 0, nullptr);
+                      options, 0, 0, 0, 0, nullptr);
 
    xcb_flush(m_connection);
    return VK_SUCCESS;

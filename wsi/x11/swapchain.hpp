@@ -4,8 +4,10 @@
 #include <vulkan/vk_icd.h>
 #include <vulkan/vulkan.h>
 #include <memory>
+#include <thread>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <xcb/present.h>
 #include "surface.hpp"
 #include "wsi/external_memory.hpp"
 #include "dri3_presenter.hpp"
@@ -60,7 +62,14 @@ private:
    xcb_window_t m_window;
    surface *m_wsi_surface;
 
+   xcb_present_event_t m_event_id = 0;
+   xcb_special_event_t *m_special_event = nullptr;
+
    std::unique_ptr<dri3_presenter> m_dri3_presenter;
+
+   void present_event_thread();
+   bool m_present_event_thread_run;
+   std::thread m_present_event_thread;
 };
 
 } /* namespace x11 */

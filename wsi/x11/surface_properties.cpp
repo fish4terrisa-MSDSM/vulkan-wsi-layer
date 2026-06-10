@@ -88,10 +88,10 @@ VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_
 }
 
 std::vector<VkFormat> support_formats {
-   VK_FORMAT_B8G8R8A8_UNORM, 
-   VK_FORMAT_B8G8R8A8_SRGB,
    VK_FORMAT_R8G8B8A8_UNORM,
-   VK_FORMAT_R8G8B8A8_SRGB
+   VK_FORMAT_R8G8B8A8_SRGB,
+   VK_FORMAT_B8G8R8A8_UNORM, 
+   VK_FORMAT_B8G8R8A8_SRGB
 };
 
 VkResult surface_properties::get_surface_formats(VkPhysicalDevice physical_device, uint32_t *surface_format_count,
