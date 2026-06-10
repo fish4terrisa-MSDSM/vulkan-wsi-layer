@@ -67,6 +67,17 @@ swapchain::~swapchain()
       m_present_cond.notify_all();
    }
 
+   /* Wake up xcb_wait_for_special_event by requesting an immediate vblank notification */
+   if (m_connection && m_window && m_special_event) {
+      xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
+      xcb_flush(m_connection);
+   }
+
+   if (m_present_event_thread.joinable())
+   {
+      m_present_event_thread.join();
+   }
+
    if (m_special_event) {
       xcb_unregister_for_special_event(m_connection, m_special_event);
       m_special_event = nullptr;
@@ -76,11 +87,6 @@ swapchain::~swapchain()
       m_event_id = 0;
    }
    xcb_flush(m_connection);
-
-   if (m_present_event_thread.joinable())
-   {
-      m_present_event_thread.join();
-   }
 
    teardown();
 }
@@ -158,10 +164,9 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    VkExternalMemoryImageCreateInfoKHR ext_info = {};
    ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
    ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-   ext_info.pNext = image_create_info.pNext; // Preserved pNext chain (resolves Zink mutable format)
+   ext_info.pNext = image_create_info.pNext;
    
    image_create_info.pNext = &ext_info;
-   
    image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
@@ -196,7 +201,7 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    uint32_t height = image_create_info.extent.height;
    uint32_t stride = layout.rowPitch;
    uint32_t fourcc = util::drm::vk_to_drm_format(image_create_info.format);
-   if (!fourcc) fourcc = 0x34325241; // DRM_FORMAT_ARGB8888 fallback
+   if (!fourcc) fourcc = 0x34325241;
 
    int depth = 24;
    uint32_t dummy_w, dummy_h;
@@ -204,7 +209,7 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
 
    res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
    if (res != VK_SUCCESS) {
-       return res;
+      return res;
    }
 
    auto present_fence = sync_fd_fence_sync::create(m_device_data);
@@ -229,9 +234,10 @@ void swapchain::present_event_thread()
       if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
          auto *idle = (xcb_present_idle_notify_event_t *)event;
 
+         std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
          for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
             auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
-            if (image_data->pixmap == idle->pixmap) {
+            if (image_data != nullptr && image_data->pixmap == idle->pixmap) {
                unpresent_image(i);
                break;
             }
@@ -251,6 +257,10 @@ void swapchain::present_event_thread()
 void swapchain::present_image(const pending_present_request &pending_present)
 {
    auto image_data = reinterpret_cast<x11_image_data *>(m_swapchain_images[pending_present.image_index].data);
+   if (image_data == nullptr) {
+      WSI_LOG_ERROR("present_image: image_data is null");
+      return;
+   }
    
    if (m_present_mode == VK_PRESENT_MODE_FIFO_KHR || m_present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
       std::unique_lock<std::mutex> lock(m_present_mutex);
@@ -287,8 +297,6 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
       image.status = wsi::swapchain_image::INVALID;
    }
 
-   image_status_lock.unlock();
-
    if (image.data != nullptr)
    {
       auto data = reinterpret_cast<x11_image_data *>(image.data);
@@ -307,12 +315,18 @@ VkResult swapchain::image_set_present_payload(swapchain_image &image, VkQueue qu
                                               const queue_submit_semaphores &semaphores, const void *submission_pnext)
 {
    auto data = reinterpret_cast<x11_image_data *>(image.data);
+   if (data == nullptr) {
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
    return data->present_fence.set_payload(queue, semaphores, submission_pnext);
 }
 
 VkResult swapchain::image_wait_present(swapchain_image &image, uint64_t timeout)
 {
    auto data = reinterpret_cast<x11_image_data *>(image.data);
+   if (data == nullptr) {
+      return VK_SUCCESS;
+   }
    return data->present_fence.wait_payload(timeout);
 }
 
@@ -322,6 +336,9 @@ VkResult swapchain::bind_swapchain_image(VkDevice &device, const VkBindImageMemo
    UNUSED(device);
    const wsi::swapchain_image &swapchain_image = m_swapchain_images[bind_sc_info->imageIndex];
    auto image_data = reinterpret_cast<x11_image_data *>(swapchain_image.data);
+   if (image_data == nullptr) {
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
    return image_data->external_mem.bind_swapchain_image_memory(bind_image_mem_info->image);
 }
 
