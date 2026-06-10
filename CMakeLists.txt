@@ -262,74 +262,26 @@ endif()
 if(BUILD_WSI_X11)
    set(CMAKE_BUILD_TYPE "Debug")
 
-   # Generate xdg-shell protocol for Xwayland bypass
-   pkg_check_modules(WAYLAND_CLIENT_X11 wayland-client)
-   find_program(WAYLAND_SCANNER_X11 wayland-scanner REQUIRED)
-   pkg_check_modules(WAYLAND_PROTOCOLS_X11 wayland-protocols)
-   pkg_get_variable(WAYLAND_PROTOCOLS_DIR_X11 wayland-protocols pkgdatadir)
-
-   add_custom_target(x11_wayland_generated_files
-      COMMAND ${WAYLAND_SCANNER_X11} client-header
-      ${WAYLAND_PROTOCOLS_DIR_X11}/stable/xdg-shell/xdg-shell.xml
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
-      COMMAND ${WAYLAND_SCANNER_X11} public-code
-      ${WAYLAND_PROTOCOLS_DIR_X11}/stable/xdg-shell/xdg-shell.xml
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
-      COMMAND ${WAYLAND_SCANNER_X11} client-header
-      ${WAYLAND_PROTOCOLS_DIR_X11}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-client-protocol.h
-      COMMAND ${WAYLAND_SCANNER_X11} public-code
-      ${WAYLAND_PROTOCOLS_DIR_X11}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-protocol.c
-      BYPRODUCTS xdg-shell-client-protocol.h xdg-shell-protocol.c
-         xdg-decoration-unstable-v1-client-protocol.h xdg-decoration-unstable-v1-protocol.c)
-
    add_library(wsi_x11 STATIC
-      wsi/x11/drm_display.cpp
       wsi/x11/surface_properties.cpp
       wsi/x11/surface.cpp
       wsi/x11/swapchain.cpp
-      wsi/x11/shm_presenter.cpp
-      wsi/x11/dri3_presenter.cpp
-      wsi/x11/wayland_bypass.cpp
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
-      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-protocol.c)
-   add_dependencies(wsi_x11 x11_wayland_generated_files wayland_generated_files)
-
-   pkg_check_modules(LIBDRM REQUIRED libdrm)
-   message(STATUS "Using libdrm include directories: ${LIBDRM_INCLUDE_DIRS}")
-   message(STATUS "Using libdrm ldflags: ${LIBDRM_LDFLAGS}")
+      wsi/x11/dri3_presenter.cpp)
 
    target_include_directories(wsi_x11 PRIVATE
       ${PROJECT_SOURCE_DIR}
       ${VULKAN_CXX_INCLUDE}
       ${CMAKE_CURRENT_BINARY_DIR})
 
-   target_include_directories(wsi_x11 PUBLIC
-      ${LIBDRM_INCLUDE_DIRS})
-
    target_compile_options(wsi_x11 INTERFACE "-DBUILD_WSI_X11=1")
-   
-   if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-      option(ENABLE_ARM_NEON "Enable ARM NEON optimizations for X11 SHM" ON)
-      if(ENABLE_ARM_NEON)
-         target_compile_definitions(wsi_x11 PRIVATE "ENABLE_ARM_NEON=1")
-         target_compile_options(wsi_x11 PRIVATE "-march=armv8-a+simd")
-         message(STATUS "Enabled ARM NEON optimizations for X11 SHM presentation")
-      endif()
-   else()
-      message(STATUS "No SIMD optimizations available for architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-   endif()
-   
-   target_link_libraries(wsi_x11 ${LIBDRM_LDFLAGS} drm)
+
    target_link_libraries(wsi_x11 drm_utils)
    if(NOT EXTERNAL_WSIALLOC_LIBRARY STREQUAL "")
       target_link_libraries(wsi_x11 ${EXTERNAL_WSIALLOC_LIBRARY})
    else()
       target_link_libraries(wsi_x11 wsialloc)
    endif()
-   target_link_libraries(wsi_x11 ${WAYLAND_CLIENT_X11_LDFLAGS})
-   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-shm xcb-sync xcb-dri3 xcb-present X11-xcb X11 Xrandr wayland-client)
+   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-sync xcb-dri3 xcb-present X11-xcb X11 Xrandr)
 else()
    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xcb_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)
    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xlib_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)

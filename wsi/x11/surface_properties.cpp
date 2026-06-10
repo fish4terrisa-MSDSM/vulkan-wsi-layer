@@ -1,32 +1,7 @@
-/*
- * Copyright (c) 2017-2019, 2021-2022 Arm Limited.
- *
- * SPDX-License-Identifier: MIT
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
-
 #include <array>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
-
 #include <vector>
 #include <xcb/xcb.h>
 #include <X11/Xlib-xcb.h>
@@ -34,8 +9,6 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_xcb.h>
 #include <vulkan/vulkan_xlib.h>
-#include <vulkan/vulkan_core.h>
-
 #include <layer/private_data.hpp>
 
 #include "surface_properties.hpp"
@@ -79,7 +52,6 @@ surface_properties &surface_properties::get_instance()
 VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_device,
                                                       VkSurfaceCapabilitiesKHR *surface_capabilities)
 {
-   /* Image count limits */
    get_surface_capabilities_common(physical_device, surface_capabilities);
    surface_capabilities->minImageCount = 4;
 
@@ -87,7 +59,6 @@ VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_
    specific_surface->get_size_and_depth(&surface_capabilities->currentExtent.width,
                                         &surface_capabilities->currentExtent.height, &depth);
 
-   /* Composite alpha */
    surface_capabilities->supportedCompositeAlpha = static_cast<VkCompositeAlphaFlagBitsKHR>(
       VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
       VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR);
@@ -101,9 +72,7 @@ VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_
 {
    TRY(check_surface_present_mode_query_is_supported(pSurfaceInfo, m_supported_modes));
 
-   /* Image count limits */
    get_surface_capabilities(physical_device, &pSurfaceCapabilities->surfaceCapabilities);
-
    m_compatible_present_modes.get_surface_present_mode_compatibility_common(pSurfaceInfo, pSurfaceCapabilities);
 
    auto surface_scaling_capabilities = util::find_extension<VkSurfacePresentScalingCapabilitiesEXT>(
@@ -120,7 +89,9 @@ VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_
 
 std::vector<VkFormat> support_formats {
    VK_FORMAT_B8G8R8A8_UNORM, 
-   VK_FORMAT_B8G8R8A8_SRGB
+   VK_FORMAT_B8G8R8A8_SRGB,
+   VK_FORMAT_R8G8B8A8_UNORM,
+   VK_FORMAT_R8G8B8A8_SRGB
 };
 
 VkResult surface_properties::get_surface_formats(VkPhysicalDevice physical_device, uint32_t *surface_format_count,
@@ -131,10 +102,7 @@ VkResult surface_properties::get_surface_formats(VkPhysicalDevice physical_devic
    std::vector<surface_format_properties> formats;
    for (auto &format : support_formats)
    {
-      if (format != VK_FORMAT_UNDEFINED)
-      {
-         formats.insert(formats.begin(), (surface_format_properties){ format });
-      }
+      formats.insert(formats.begin(), (surface_format_properties){ format });
    }
    return surface_properties_formats_helper(formats.begin(), formats.end(), surface_format_count, surface_formats,
                                             extended_surface_formats);
@@ -157,9 +125,6 @@ static const char *required_device_extensions[] = {
    VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
    VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
    VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-   VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
-   VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
-   VK_KHR_MAINTENANCE1_EXTENSION_NAME,
    VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
 };
 
@@ -185,7 +150,6 @@ VWL_VKAPI_CALL(VkResult)
 CreateXcbSurfaceKHR(VkInstance instance, const VkXcbSurfaceCreateInfoKHR *pCreateInfo,
                     const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface) VWL_API_POST
 {
-   
    auto &instance_data = layer::instance_private_data::get(instance);
    util::allocator allocator{ instance_data.get_allocator(), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, pAllocator };
 
@@ -217,69 +181,14 @@ GetPhysicalDeviceSurfaceSupportKHR(VkPhysicalDevice physicalDevice, uint32_t que
    return VK_SUCCESS;
 }
 
-static bool visual_supported(xcb_visualtype_t *visual)
-{
-   if (!visual)
-      return false;
-
-   return visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR || visual->_class == XCB_VISUAL_CLASS_DIRECT_COLOR;
-}
-
-static xcb_visualtype_t *screen_get_visualtype(xcb_screen_t *screen, xcb_visualid_t visual_id, unsigned *depth)
-{
-   xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(screen);
-
-   for (; depth_iter.rem; xcb_depth_next(&depth_iter))
-   {
-      xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
-
-      for (; visual_iter.rem; xcb_visualtype_next(&visual_iter))
-      {
-         if (visual_iter.data->visual_id == visual_id)
-         {
-            if (depth)
-               *depth = depth_iter.data->depth;
-            return visual_iter.data;
-         }
-      }
-   }
-
-   return NULL;
-}
-
-static xcb_visualtype_t *connection_get_visualtype(xcb_connection_t *conn, xcb_visualid_t visual_id)
-{
-   xcb_screen_iterator_t screen_iter = xcb_setup_roots_iterator(xcb_get_setup(conn));
-
-   /* For this we have to iterate over all of the screens which is rather
-    * annoying.  Fortunately, there is probably only 1.
-    */
-   for (; screen_iter.rem; xcb_screen_next(&screen_iter))
-   {
-      xcb_visualtype_t *visual = screen_get_visualtype(screen_iter.data, visual_id, NULL);
-      if (visual)
-         return visual;
-   }
-
-   return NULL;
-}
-
 VWL_VKAPI_CALL(VkBool32)
 GetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex,
                                            xcb_connection_t *connection, xcb_visualid_t visual_id)
 {
    UNUSED(queueFamilyIndex);
-   bool dev_supports_sync =
-      sync_fd_fence_sync::is_supported(layer::instance_private_data::get(physicalDevice), physicalDevice);
-   if (!dev_supports_sync)
-   {
-      return VK_FALSE;
-   }
-
-   if (!visual_supported(connection_get_visualtype(connection, visual_id)))
-      return false;
-
-   return VK_TRUE;
+   UNUSED(connection);
+   UNUSED(visual_id);
+   return sync_fd_fence_sync::is_supported(layer::instance_private_data::get(physicalDevice), physicalDevice) ? VK_TRUE : VK_FALSE;
 }
 
 VWL_VKAPI_CALL(VkResult)
@@ -306,26 +215,11 @@ GetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physicalDevice, uin
 
 PFN_vkVoidFunction surface_properties::get_proc_addr(const char *name)
 {
-   if (strcmp(name, "vkCreateXcbSurfaceKHR") == 0)
-   {
-      return reinterpret_cast<PFN_vkVoidFunction>(CreateXcbSurfaceKHR);
-   }
-   if (strcmp(name, "vkCreateXlibSurfaceKHR") == 0)
-   {
-      return reinterpret_cast<PFN_vkVoidFunction>(CreateXlibSurfaceKHR);
-   }
-   if (strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0)
-   {
-      return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceSupportKHR);
-   }
-   if (strcmp(name, "vkGetPhysicalDeviceXcbPresentationSupportKHR") == 0)
-   {
-      return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceXcbPresentationSupportKHR);
-   }
-   if (strcmp(name, "vkGetPhysicalDeviceXlibPresentationSupportKHR") == 0)
-   {
-      return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceXlibPresentationSupportKHR);
-   }
+   if (strcmp(name, "vkCreateXcbSurfaceKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CreateXcbSurfaceKHR);
+   if (strcmp(name, "vkCreateXlibSurfaceKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CreateXlibSurfaceKHR);
+   if (strcmp(name, "vkGetPhysicalDeviceSurfaceSupportKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceSupportKHR);
+   if (strcmp(name, "vkGetPhysicalDeviceXcbPresentationSupportKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceXcbPresentationSupportKHR);
+   if (strcmp(name, "vkGetPhysicalDeviceXlibPresentationSupportKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceXlibPresentationSupportKHR);
    return nullptr;
 }
 
