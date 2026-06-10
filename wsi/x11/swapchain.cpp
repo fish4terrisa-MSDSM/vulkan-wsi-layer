@@ -1,11 +1,7 @@
 #include <cassert>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <system_error>
-#include <thread>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -57,25 +53,12 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
    , m_connection(wsi_surface.get_connection())
    , m_window(wsi_surface.get_window())
    , m_wsi_surface(&wsi_surface)
-   , m_thread_status_lock()
-   , m_thread_status_cond()
 {
    m_image_create_info.format = VK_FORMAT_UNDEFINED;
 }
 
 swapchain::~swapchain()
 {
-   {
-      auto thread_status_lock = std::unique_lock<std::mutex>(m_thread_status_lock);
-      m_present_event_thread_run = false;
-      m_thread_status_cond.notify_all();
-   }
-
-   if (m_present_event_thread.joinable())
-   {
-      m_present_event_thread.join();
-   }
-
    m_page_flip_thread_run = false;
    m_page_flip_semaphore.post();
 
@@ -101,15 +84,6 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
 
    m_dri3_presenter = std::move(dri3);
    WSI_LOG_INFO("x11 swapchain: Successfully initialized termux-x11 DRI3 presenter");
-
-   try
-   {
-      m_present_event_thread = std::thread(&swapchain::present_event_thread, this);
-   }
-   catch (...)
-   {
-      return VK_ERROR_INITIALIZATION_FAILED;
-   }
 
    return VK_SUCCESS;
 }
@@ -142,8 +116,8 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    
    image_create_info.pNext = &ext_info;
    
-   // Termux-X11 explicitly requires linear backing memory since it mmap()s the FD 
-   // and calls glTexSubImage2D on the CPU.
+   // Termux-X11 strictly requires LINEAR tiling because it mmap()s the FD and 
+   // calls glTexSubImage2D on the CPU memory directly.
    image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
@@ -204,33 +178,6 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    return VK_SUCCESS;
 }
 
-void swapchain::present_event_thread()
-{
-   auto thread_status_lock = std::unique_lock<std::mutex>(m_thread_status_lock);
-   m_present_event_thread_run = true;
-
-   while (m_present_event_thread_run)
-   {
-      if (error_has_occured()) break;
-
-      thread_status_lock.unlock();
-
-      xcb_generic_event_t *event;
-      while ((event = xcb_poll_for_event(m_connection)) != nullptr)
-      {
-         // We let X11 do its thing in the background. Because termux-x11 uses XCB_PRESENT_OPTION_COPY, 
-         // it doesn't stall application flow. We can discard events we don't care about.
-         free(event);
-      }
-
-      thread_status_lock.lock();
-      m_thread_status_cond.wait_for(thread_status_lock, std::chrono::milliseconds(8));
-   }
-
-   m_present_event_thread_run = false;
-   m_thread_status_cond.notify_all();
-}
-
 void swapchain::present_image(const pending_present_request &pending_present)
 {
    auto image_data = reinterpret_cast<x11_image_data *>(m_swapchain_images[pending_present.image_index].data);
@@ -250,56 +197,6 @@ void swapchain::present_image(const pending_present_request &pending_present)
 
    // Because of OPTION_COPY, the image is immediately available for reuse by Vulkan.
    unpresent_image(pending_present.image_index);
-}
-
-bool swapchain::free_image_found()
-{
-   for (auto &img : m_swapchain_images)
-   {
-      if (img.status == swapchain_image::FREE)
-      {
-         return true;
-      }
-   }
-   return false;
-}
-
-VkResult swapchain::get_free_buffer(uint64_t *timeout)
-{
-   auto thread_status_lock = std::unique_lock<std::mutex>(m_thread_status_lock);
-
-   if (*timeout == 0)
-   {
-      return free_image_found() ? VK_SUCCESS : VK_NOT_READY;
-   }
-   else if (*timeout == UINT64_MAX)
-   {
-      while (!free_image_found())
-      {
-         if (!m_present_event_thread_run)
-            return VK_ERROR_OUT_OF_DATE_KHR;
-
-         m_thread_status_cond.wait(thread_status_lock);
-      }
-   }
-   else
-   {
-      auto time_point = std::chrono::high_resolution_clock::now() + std::chrono::nanoseconds(*timeout);
-
-      while (!free_image_found())
-      {
-         if (!m_present_event_thread_run)
-            return VK_ERROR_OUT_OF_DATE_KHR;
-
-         if (m_thread_status_cond.wait_until(thread_status_lock, time_point) == std::cv_status::timeout)
-         {
-            return VK_TIMEOUT;
-         }
-      }
-   }
-
-   *timeout = 0;
-   return VK_SUCCESS;
 }
 
 void swapchain::destroy_image(wsi::swapchain_image &image)
