@@ -61,6 +61,12 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
 swapchain::~swapchain()
 {
    m_present_event_thread_run = false;
+   {
+      std::unique_lock<std::mutex> lock(m_present_mutex);
+      m_outstanding_pixmaps = 0;
+      m_present_cond.notify_all();
+   }
+
    if (m_special_event) {
       xcb_unregister_for_special_event(m_connection, m_special_event);
       m_special_event = nullptr;
@@ -152,11 +158,10 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    VkExternalMemoryImageCreateInfoKHR ext_info = {};
    ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
    ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+   ext_info.pNext = image_create_info.pNext; // Preserved pNext chain (resolves Zink mutable format)
    
    image_create_info.pNext = &ext_info;
    
-   // Termux-X11 strictly requires LINEAR tiling because it mmap()s the FD 
-   // and calls glTexSubImage2D on the CPU memory directly.
    image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
@@ -168,13 +173,11 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    VkMemoryRequirements reqs;
    m_device_data.disp.GetImageMemoryRequirements(m_device, image.image, &reqs);
 
-   // Direct dma_heap allocation ensuring mapped capability
    int dma_buf_fd = alloc_dma_heap(reqs.size);
    if (dma_buf_fd < 0) {
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   // Register FD with external memory wrapper to bind
    image_data->external_mem.set_buffer_fds({dma_buf_fd, -1, -1, -1});
    image_data->external_mem.set_num_memories(1);
    image_data->external_mem.set_format_info(false, 1);
@@ -185,8 +188,6 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
       return res;
    }
 
-   // Query Vulkan layout to get exactly what the driver chose for rowPitch.
-   // Because the tiling is LINEAR, querying VK_IMAGE_ASPECT_COLOR_BIT works reliably.
    VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
    VkSubresourceLayout layout;
    m_device_data.disp.GetImageSubresourceLayout(m_device, image.image, &subres, &layout);
@@ -201,8 +202,6 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    uint32_t dummy_w, dummy_h;
    m_wsi_surface->get_size_and_depth(&dummy_w, &dummy_h, &depth);
 
-   // 1274 is Termux-X11's custom internal modifier for 'RAW_MMAPPABLE_FD'.
-   // This guarantees that termux-x11 accepts the FD and mmap()s it correctly.
    res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
    if (res != VK_SUCCESS) {
        return res;
@@ -230,13 +229,18 @@ void swapchain::present_event_thread()
       if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
          auto *idle = (xcb_present_idle_notify_event_t *)event;
 
-         // Find the image bound to this pixmap and unpresent it
          for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
             auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
             if (image_data->pixmap == idle->pixmap) {
-               unpresent_image(i); // Marks it FREE and posts the semaphore
+               unpresent_image(i);
                break;
             }
+         }
+      } else if (ge->evtype == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
+         std::unique_lock<std::mutex> lock(m_present_mutex);
+         if (m_outstanding_pixmaps > 0) {
+            m_outstanding_pixmaps--;
+            m_present_cond.notify_one();
          }
       }
 
@@ -248,7 +252,14 @@ void swapchain::present_image(const pending_present_request &pending_present)
 {
    auto image_data = reinterpret_cast<x11_image_data *>(m_swapchain_images[pending_present.image_index].data);
    
-   // Send to termux-x11 directly. XCB_PRESENT_OPTION_COPY makes the server copy immediately.
+   if (m_present_mode == VK_PRESENT_MODE_FIFO_KHR || m_present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) {
+      std::unique_lock<std::mutex> lock(m_present_mutex);
+      while (m_outstanding_pixmaps >= 1) {
+         m_present_cond.wait(lock);
+      }
+      m_outstanding_pixmaps++;
+   }
+
    VkResult present_result = m_dri3_presenter->present_image(image_data, 0, m_present_mode);
 
    if (present_result != VK_SUCCESS) {
@@ -260,9 +271,6 @@ void swapchain::present_image(const pending_present_request &pending_present)
       auto *ext = get_swapchain_extension<wsi_ext_present_id>(true);
       ext->set_present_id(pending_present.present_id);
    }
-
-   // No unpresent_image here anymore! 
-   // It is now strictly handled by IDLE_NOTIFY in present_event_thread.
 }
 
 void swapchain::destroy_image(wsi::swapchain_image &image)

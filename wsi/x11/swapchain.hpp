@@ -5,6 +5,8 @@
 #include <vulkan/vulkan.h>
 #include <memory>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
 #include <xcb/present.h>
@@ -70,6 +72,10 @@ private:
    void present_event_thread();
    bool m_present_event_thread_run;
    std::thread m_present_event_thread;
+
+   std::mutex m_present_mutex;
+   std::condition_variable m_present_cond;
+   uint32_t m_outstanding_pixmaps = 0;
 };
 
 } /* namespace x11 */
