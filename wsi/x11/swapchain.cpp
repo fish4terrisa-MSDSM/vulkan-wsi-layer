@@ -136,32 +136,20 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    auto image_data = static_cast<x11_image_data *>(image.data);
    image_status_lock.unlock();
 
-   // First try with DRM_FORMAT_MODIFIER_EXT (Modifier 0 = LINEAR)
    VkExternalMemoryImageCreateInfoKHR ext_info = {};
    ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
    ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-
-   uint64_t linear_modifier = 0;
-   VkImageDrmFormatModifierListCreateInfoEXT mod_list = {};
-   mod_list.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
-   mod_list.pNext = &ext_info;
-   mod_list.drmFormatModifierCount = 1;
-   mod_list.pDrmFormatModifiers = &linear_modifier;
-
-   image_create_info.pNext = &mod_list;
-   image_create_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+   
+   image_create_info.pNext = &ext_info;
+   
+   // Termux-X11 explicitly requires linear backing memory since it mmap()s the FD 
+   // and calls glTexSubImage2D on the CPU.
+   image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
-
-   // Fallback to strict LINEAR tiling
    if (res != VK_SUCCESS) {
-      image_create_info.pNext = &ext_info;
-      image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
-      res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
-      if (res != VK_SUCCESS) {
-         WSI_LOG_ERROR("Failed to create VK_IMAGE_TILING_LINEAR swapchain image");
-         return res;
-      }
+      WSI_LOG_ERROR("Failed to create VK_IMAGE_TILING_LINEAR swapchain image");
+      return res;
    }
 
    VkMemoryRequirements reqs;
@@ -184,7 +172,8 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
       return res;
    }
 
-   // Query Vulkan layout to get exactly what the driver chose for rowPitch
+   // Query Vulkan layout to get exactly what the driver chose for rowPitch.
+   // Because the tiling is LINEAR, querying VK_IMAGE_ASPECT_COLOR_BIT works reliably.
    VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
    VkSubresourceLayout layout;
    m_device_data.disp.GetImageSubresourceLayout(m_device, image.image, &subres, &layout);
@@ -199,7 +188,9 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    uint32_t dummy_w, dummy_h;
    m_wsi_surface->get_size_and_depth(&dummy_w, &dummy_h, &depth);
 
-   res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 0 /* linear */);
+   // 1274 is Termux-X11's custom internal modifier for 'RAW_MMAPPABLE_FD'.
+   // This guarantees that termux-x11 accepts the FD and mmap()s it correctly.
+   res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
    if (res != VK_SUCCESS) {
        return res;
    }
@@ -227,7 +218,7 @@ void swapchain::present_event_thread()
       xcb_generic_event_t *event;
       while ((event = xcb_poll_for_event(m_connection)) != nullptr)
       {
-         // We let X11 do its thing in the background. Because termux-x11 uses XCB_PRESENT_OPTION_COPY,
+         // We let X11 do its thing in the background. Because termux-x11 uses XCB_PRESENT_OPTION_COPY, 
          // it doesn't stall application flow. We can discard events we don't care about.
          free(event);
       }
@@ -243,7 +234,7 @@ void swapchain::present_event_thread()
 void swapchain::present_image(const pending_present_request &pending_present)
 {
    auto image_data = reinterpret_cast<x11_image_data *>(m_swapchain_images[pending_present.image_index].data);
-
+   
    // Send to termux-x11 directly. XCB_PRESENT_OPTION_COPY makes the server copy immediately.
    VkResult present_result = m_dri3_presenter->present_image(image_data, 0);
 
