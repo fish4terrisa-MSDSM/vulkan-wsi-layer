@@ -378,6 +378,7 @@ private:
    EP(BeginCommandBuffer, "", VK_API_VERSION_1_0, true)                                                            \
    EP(EndCommandBuffer, "", VK_API_VERSION_1_0, true)                                                              \
    EP(CreateImage, "", VK_API_VERSION_1_0, true)                                                                   \
+   EP(CreateGraphicsPipelines, "", VK_API_VERSION_1_0, true)                                                       \
    EP(DestroyImage, "", VK_API_VERSION_1_0, true)                                                                  \
    EP(GetImageMemoryRequirements, "", VK_API_VERSION_1_0, true)                                                    \
    EP(BindImageMemory, "", VK_API_VERSION_1_0, true)                                                               \

@@ -79,3 +79,8 @@ wsi_layer_vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
 
 VWL_VKAPI_CALL(VkResult)
 wsi_layer_vkGetSwapchainStatusKHR(VkDevice device, VkSwapchainKHR swapchain) VWL_API_POST;
+
+VWL_VKAPI_CALL(VkResult)
+wsi_layer_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                    const VkGraphicsPipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks* pAllocator,
+                                    VkPipeline* pPipelines) VWL_API_POST;

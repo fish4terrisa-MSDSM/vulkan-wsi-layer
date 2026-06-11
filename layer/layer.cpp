@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <array>
+#include <cstdlib>
 
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
@@ -516,6 +517,80 @@ wsi_layer_vkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice physicalDevice,
 #endif
 }
 
+VWL_VKAPI_CALL(VkResult)
+wsi_layer_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char* pLayerName,
+                                               uint32_t* pPropertyCount, VkExtensionProperties* pProperties) VWL_API_POST
+{
+   auto &instance = layer::instance_private_data::get(physicalDevice);
+
+   if (pLayerName && strcmp(pLayerName, "VK_LAYER_window_system_integration") != 0) {
+      return instance.disp.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+   }
+
+   uint32_t icdCount = 0;
+   VkResult res = instance.disp.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &icdCount, nullptr);
+   if (res != VK_SUCCESS) return res;
+
+   util::vector<VkExtensionProperties> props{ util::allocator::get_generic() };
+   if (!props.try_resize(icdCount)) return VK_ERROR_OUT_OF_HOST_MEMORY;
+   res = instance.disp.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &icdCount, props.data());
+   if (res != VK_SUCCESS && res != VK_INCOMPLETE) return res;
+
+   const char* force_exts = std::getenv("WSI_FORCE_ENABLE_EXTENSIONS");
+   if (force_exts && strcmp(force_exts, "1") == 0) {
+       const char* extra_exts[] = {
+           "VK_EXT_conditional_rendering",
+           "VK_EXT_descriptor_buffer",
+           "VK_EXT_descriptor_heap",
+           "VK_KHR_shader_untyped_pointers",
+           "VK_KHR_dynamic_rendering_local_read",
+           "VK_KHR_fragment_shader_barycentric",
+           "VK_KHR_pipeline_library",
+           "VK_EXT_graphics_pipeline_library",
+           "VK_EXT_host_image_copy",
+           "VK_EXT_mesh_shader",
+           "VK_KHR_ray_tracing_pipeline",
+           "VK_EXT_shader_object",
+           "VK_KHR_swapchain_mutable_format"
+       };
+       for (const char* ext : extra_exts) {
+           bool found = false;
+           for (uint32_t i = 0; i < icdCount; ++i) {
+               if (strcmp(props[i].extensionName, ext) == 0) {
+                   found = true;
+                   break;
+               }
+           }
+           if (!found) {
+               VkExtensionProperties p = {};
+               strncpy(p.extensionName, ext, VK_MAX_EXTENSION_NAME_SIZE - 1);
+               p.extensionName[VK_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
+               p.specVersion = 1;
+               if (!props.try_push_back(p)) return VK_ERROR_OUT_OF_HOST_MEMORY;
+           }
+       }
+   }
+
+   if (pProperties == nullptr) {
+       *pPropertyCount = props.size();
+       return VK_SUCCESS;
+   }
+
+   uint32_t copyCount = std::min(*pPropertyCount, static_cast<uint32_t>(props.size()));
+   for (uint32_t i = 0; i < copyCount; ++i) {
+       pProperties[i] = props[i];
+   }
+
+   if (copyCount < props.size()) {
+       *pPropertyCount = copyCount;
+       return VK_INCOMPLETE;
+   }
+
+   *pPropertyCount = copyCount;
+   return VK_SUCCESS;
+}
+
+
 #define GET_PROC_ADDR(func)      \
    if (!strcmp(funcName, #func)) \
       return (PFN_vkVoidFunction)&wsi_layer_##func;
@@ -552,6 +627,7 @@ wsi_layer_vkGetDeviceProcAddr(VkDevice device, const char *funcName) VWL_API_POS
 
    GET_PROC_ADDR(vkCreateImage);
    GET_PROC_ADDR(vkBindImageMemory2);
+   GET_PROC_ADDR(vkCreateGraphicsPipelines);
 
    /* VK_EXT_swapchain_maintenance1 */
    if (layer::device_private_data::get(device).is_device_extension_enabled(
@@ -573,6 +649,7 @@ wsi_layer_vkGetInstanceProcAddr(VkInstance instance, const char *funcName) VWL_A
    GET_PROC_ADDR(vkDestroyInstance);
    GET_PROC_ADDR(vkCreateDevice);
    GET_PROC_ADDR(vkGetPhysicalDevicePresentRectanglesKHR);
+   GET_PROC_ADDR(vkEnumerateDeviceExtensionProperties);
 
    if (!strcmp(funcName, "vkGetPhysicalDeviceFeatures2"))
    {

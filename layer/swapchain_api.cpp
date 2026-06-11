@@ -363,7 +363,10 @@ wsi_layer_vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo, c
 
    if (image_sc_create_info == nullptr || !device_data.layer_owns_swapchain(image_sc_create_info->swapchain))
    {
-      return device_data.disp.CreateImage(device_data.device, pCreateInfo, pAllocator, pImage);
+      // Force MUTABLE_FORMAT_BIT on all general images to workaround the Adreno UBWC flickering hardware bug
+      VkImageCreateInfo modified_info = *pCreateInfo;
+      modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      return device_data.disp.CreateImage(device_data.device, &modified_info, pAllocator, pImage);
    }
 
    auto sc = reinterpret_cast<wsi::swapchain_base *>(image_sc_create_info->swapchain);
@@ -436,4 +439,29 @@ wsi_layer_vkGetSwapchainStatusKHR(VkDevice device, VkSwapchainKHR swapchain) VWL
    auto *sc = reinterpret_cast<wsi::swapchain_base *>(swapchain);
 
    return sc->get_swapchain_status();
+}
+
+VWL_VKAPI_CALL(VkResult)
+wsi_layer_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                    const VkGraphicsPipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks* pAllocator,
+                                    VkPipeline* pPipelines) VWL_API_POST
+{
+   auto &device_data = layer::device_private_data::get(device);
+   
+   util::vector<VkGraphicsPipelineCreateInfo> modified_infos{ util::allocator{ device_data.get_allocator(), VK_SYSTEM_ALLOCATION_SCOPE_COMMAND } };
+   if (!modified_infos.try_resize(createInfoCount)) {
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   for (uint32_t i = 0; i < createInfoCount; ++i) {
+      modified_infos[i] = pCreateInfos[i];
+      if (modified_infos[i].pRasterizationState && modified_infos[i].pRasterizationState->rasterizerDiscardEnable == VK_TRUE) {
+         // Workaround for Adreno and Mali driver crashes when discard is enabled 
+         modified_infos[i].pMultisampleState = nullptr;
+         modified_infos[i].pDepthStencilState = nullptr;
+         modified_infos[i].pColorBlendState = nullptr;
+      }
+   }
+
+   return device_data.disp.CreateGraphicsPipelines(device, pipelineCache, createInfoCount, modified_infos.data(), pAllocator, pPipelines);
 }
