@@ -365,33 +365,20 @@ wsi_layer_vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo, c
    {
       VkImageCreateInfo modified_info = *pCreateInfo;
       
-      // Force ALIAS_BIT as a reliable way to disable Adreno UBWC hardware bugs safely
-      modified_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
-
       /*
        * Despite my best effort, the adreno vulkan driver is so retarded
        * that VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT must stay on no matter what,
-       * to disable ubwc at any cost. Otherwise it completely fk up the android side's graphic.
+       * to disable ubwc at any cost. 
+       * Otherwise it completely fk up the android side's graphic.
        * Nice job, qualcomm.
        */
-          modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+      // Force ALIAS_BIT and MUTABLE_FORMAT_BIT as a reliable way to disable Adreno UBWC hardware bugs safely
+      modified_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
       // Override tiling to completely defeat UBWC overrides by DRM formats
       if (modified_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
          modified_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-      }
-
-      // Prepend format list copy with viewFormatCount = 0 to prevent vendor driver from assuming it can still safely compress
-      VkImageFormatListCreateInfo format_list_copy = {};
-      const auto *format_list = util::find_extension<VkImageFormatListCreateInfo>(
-         VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, modified_info.pNext);
-      
-      if (format_list != nullptr) {
-         format_list_copy = *format_list;
-         format_list_copy.viewFormatCount = 0;
-         format_list_copy.pViewFormats = nullptr;
-         format_list_copy.pNext = const_cast<void*>(modified_info.pNext);
-         modified_info.pNext = &format_list_copy;
       }
 
       return device_data.disp.CreateImage(device_data.device, &modified_info, pAllocator, pImage);

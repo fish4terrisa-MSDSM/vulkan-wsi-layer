@@ -536,10 +536,21 @@ wsi_layer_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, 
    res = instance.disp.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &icdCount, props.data());
    if (res != VK_SUCCESS && res != VK_INCOMPLETE) return res;
 
+   util::vector<VkExtensionProperties> filtered_props{ util::allocator::get_generic() };
+   for (uint32_t i = 0; i < props.size(); ++i) {
+       // Filter out vendor X11 extensions to force layer's WSI usage
+       if (strstr(props[i].extensionName, "x11") != nullptr ||
+           strstr(props[i].extensionName, "xcb") != nullptr ||
+           strstr(props[i].extensionName, "xlib") != nullptr) {
+           continue;
+       }
+       if (!filtered_props.try_push_back(props[i])) return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
    // Emulate VK_KHR_swapchain_mutable_format if missing from underlying driver
    bool found_mutable_format = false;
-   for (uint32_t i = 0; i < props.size(); ++i) {
-       if (strcmp(props[i].extensionName, "VK_KHR_swapchain_mutable_format") == 0) {
+   for (uint32_t i = 0; i < filtered_props.size(); ++i) {
+       if (strcmp(filtered_props[i].extensionName, "VK_KHR_swapchain_mutable_format") == 0) {
            found_mutable_format = true;
            break;
        }
@@ -549,20 +560,20 @@ wsi_layer_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, 
        strncpy(p.extensionName, "VK_KHR_swapchain_mutable_format", VK_MAX_EXTENSION_NAME_SIZE - 1);
        p.extensionName[VK_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
        p.specVersion = 1;
-       if (!props.try_push_back(p)) return VK_ERROR_OUT_OF_HOST_MEMORY;
+       if (!filtered_props.try_push_back(p)) return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
    if (pProperties == nullptr) {
-       *pPropertyCount = props.size();
+       *pPropertyCount = filtered_props.size();
        return VK_SUCCESS;
    }
 
-   uint32_t copyCount = std::min(*pPropertyCount, static_cast<uint32_t>(props.size()));
+   uint32_t copyCount = std::min(*pPropertyCount, static_cast<uint32_t>(filtered_props.size()));
    for (uint32_t i = 0; i < copyCount; ++i) {
-       pProperties[i] = props[i];
+       pProperties[i] = filtered_props[i];
    }
 
-   if (copyCount < props.size()) {
+   if (copyCount < filtered_props.size()) {
        *pPropertyCount = copyCount;
        return VK_INCOMPLETE;
    }
