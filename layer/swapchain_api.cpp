@@ -363,9 +363,28 @@ wsi_layer_vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo, c
 
    if (image_sc_create_info == nullptr || !device_data.layer_owns_swapchain(image_sc_create_info->swapchain))
    {
-      // Force MUTABLE_FORMAT_BIT on all general images to workaround the Adreno UBWC flickering hardware bug
+      // Force MUTABLE_FORMAT_BIT and ALIAS_BIT on all general images to workaround the Adreno UBWC flickering hardware bug
       VkImageCreateInfo modified_info = *pCreateInfo;
-      modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
+      
+      // Override tiling to completely defeat UBWC overrides by DRM formats
+      if (modified_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+         modified_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+      }
+
+      // Prepend format list copy with viewFormatCount = 0 to prevent vendor driver from assuming it can still safely compress
+      VkImageFormatListCreateInfo format_list_copy = {};
+      const auto *format_list = util::find_extension<VkImageFormatListCreateInfo>(
+         VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO, modified_info.pNext);
+      
+      if (format_list != nullptr) {
+         format_list_copy = *format_list;
+         format_list_copy.viewFormatCount = 0;
+         format_list_copy.pViewFormats = nullptr;
+         format_list_copy.pNext = const_cast<void*>(modified_info.pNext);
+         modified_info.pNext = &format_list_copy;
+      }
+
       return device_data.disp.CreateImage(device_data.device, &modified_info, pAllocator, pImage);
    }
 
@@ -448,6 +467,18 @@ wsi_layer_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCac
 {
    auto &device_data = layer::device_private_data::get(device);
    
+   bool needs_modification = false;
+   for (uint32_t i = 0; i < createInfoCount; ++i) {
+      if (pCreateInfos[i].pRasterizationState && pCreateInfos[i].pRasterizationState->rasterizerDiscardEnable == VK_TRUE) {
+         needs_modification = true;
+         break;
+      }
+   }
+
+   if (!needs_modification) {
+      return device_data.disp.CreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+   }
+
    util::vector<VkGraphicsPipelineCreateInfo> modified_infos{ util::allocator{ device_data.get_allocator(), VK_SYSTEM_ALLOCATION_SCOPE_COMMAND } };
    if (!modified_infos.try_resize(createInfoCount)) {
        return VK_ERROR_OUT_OF_HOST_MEMORY;

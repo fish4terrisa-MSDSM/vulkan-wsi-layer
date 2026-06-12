@@ -158,7 +158,7 @@ VkResult swapchain::create_swapchain_image(VkImageCreateInfo image_create_info, 
    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
    image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-   image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
 
    VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
    if (res != VK_SUCCESS) {
