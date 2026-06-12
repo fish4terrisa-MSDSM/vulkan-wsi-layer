@@ -94,7 +94,7 @@ VkResult fence_sync::wait_payload(uint64_t timeout)
    return res;
 }
 
-VkResult fence_sync::set_payload(VkQueue queue, const queue_submit_semaphores &semaphores, const void *submission_pnext)
+VkResult fence_sync::set_payload(VkQueue queue, const queue_submit_semaphores &semaphores, const void *submission_pnext, VkCommandBuffer cmd_buf)
 {
    VkResult result = dev->disp.ResetFences(dev->device, 1, &fence);
    if (result != VK_SUCCESS)
@@ -103,7 +103,7 @@ VkResult fence_sync::set_payload(VkQueue queue, const queue_submit_semaphores &s
    }
    has_payload = false;
 
-   result = sync_queue_submit(*dev, queue, fence, semaphores, submission_pnext);
+   result = sync_queue_submit(*dev, queue, fence, semaphores, submission_pnext, cmd_buf);
    if (result == VK_SUCCESS)
    {
       has_payload = true;
@@ -170,13 +170,14 @@ std::optional<util::fd_owner> sync_fd_fence_sync::export_sync_fd()
 }
 
 VkResult sync_queue_submit(const layer::device_private_data &device, VkQueue queue, VkFence fence,
-                           const queue_submit_semaphores &semaphores, const void *submission_pnext)
+                           const queue_submit_semaphores &semaphores, const void *submission_pnext, VkCommandBuffer cmd_buf)
 {
    /* When the semaphore that comes in is signalled, we know that all work is done. So, we do not
     * want to block any future Vulkan queue work on it. So, we pass in BOTTOM_OF_PIPE bit as the
-    * wait flag.
+    * wait flag. But if we embed an actual copy command buffer, we should wait earlier so the
+    * copy has data ready. ALL_COMMANDS_BIT guarantees optimal sync stability when batched together.
     */
-   VkPipelineStageFlags pipeline_stage_flag = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+   VkPipelineStageFlags pipeline_stage_flag = cmd_buf != VK_NULL_HANDLE ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
    VkPipelineStageFlags *pipeline_stage_flag_data = &pipeline_stage_flag;
 
    util::vector<VkPipelineStageFlags> pipeline_stage_flags_vector{ util::allocator(
@@ -189,7 +190,7 @@ VkResult sync_queue_submit(const layer::device_private_data &device, VkQueue que
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
       std::fill(pipeline_stage_flags_vector.begin(), pipeline_stage_flags_vector.end(),
-                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+                pipeline_stage_flag);
       pipeline_stage_flag_data = pipeline_stage_flags_vector.data();
    }
 
@@ -198,8 +199,8 @@ VkResult sync_queue_submit(const layer::device_private_data &device, VkQueue que
                                 semaphores.wait_semaphores_count,
                                 semaphores.wait_semaphores,
                                 pipeline_stage_flag_data,
-                                0,
-                                nullptr,
+                                cmd_buf != VK_NULL_HANDLE ? 1U : 0U,
+                                cmd_buf != VK_NULL_HANDLE ? &cmd_buf : nullptr,
                                 semaphores.signal_semaphores_count,
                                 semaphores.signal_semaphores };
 

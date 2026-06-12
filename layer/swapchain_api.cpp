@@ -396,6 +396,12 @@ wsi_layer_vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
 
    VkResult endpoint_result = VK_SUCCESS;
    bool maintenance_6 = device_data.is_device_extension_enabled(VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
+   
+   util::vector<VkBindImageMemoryInfo> regular_binds{ util::allocator(device_data.get_allocator(), VK_SYSTEM_ALLOCATION_SCOPE_COMMAND) };
+   if (!regular_binds.try_reserve(bindInfoCount)) {
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
    for (uint32_t i = 0; i < bindInfoCount; i++)
    {
       VkResult result = VK_SUCCESS;
@@ -407,16 +413,21 @@ wsi_layer_vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
       if (bind_sc_info == nullptr || bind_sc_info->swapchain == VK_NULL_HANDLE ||
           !device_data.layer_owns_swapchain(bind_sc_info->swapchain))
       {
-         result = device_data.disp.BindImageMemory2KHR(device, 1, &pBindInfos[i]);
-         error_message = "Failed to bind image memory";
+         regular_binds.try_push_back(pBindInfos[i]);
+         continue; // process later in batch
       }
       else
       {
          auto sc = reinterpret_cast<wsi::swapchain_base *>(bind_sc_info->swapchain);
-         TRY_LOG(sc->is_bind_allowed(bind_sc_info->imageIndex),
-                 "Bind is not allowed on images that haven't been acquired first.");
-         result = sc->bind_swapchain_image(device, &pBindInfos[i], bind_sc_info);
-         error_message = "Failed to bind an image to the swapchain";
+         result = sc->is_bind_allowed(bind_sc_info->imageIndex);
+         if (result != VK_SUCCESS) {
+             error_message = "Bind is not allowed on images that haven't been acquired first.";
+         } else {
+             result = sc->bind_swapchain_image(device, &pBindInfos[i], bind_sc_info);
+             if (result != VK_SUCCESS) {
+                 error_message = "Failed to bind an image to the swapchain";
+             }
+         }
       }
 
       if (maintenance_6)
@@ -438,6 +449,14 @@ wsi_layer_vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
          endpoint_result = result;
       }
    }
+
+   if (regular_binds.size() > 0) {
+       VkResult result = device_data.disp.BindImageMemory2KHR(device, regular_binds.size(), regular_binds.data());
+       if (result != VK_SUCCESS) {
+           endpoint_result = result;
+       }
+   }
+
    return endpoint_result;
 }
 

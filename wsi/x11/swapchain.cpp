@@ -499,37 +499,7 @@ VkResult swapchain::image_set_present_payload(swapchain_image &image, VkQueue qu
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   util::vector<VkPipelineStageFlags> wait_stages{ util::allocator(
-      m_allocator, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND) };
-   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-   const VkPipelineStageFlags *wait_stage_data = &wait_stage;
-   if (semaphores.wait_semaphores_count > 1) {
-      if (wait_stages.try_resize(semaphores.wait_semaphores_count)) {
-         std::fill(wait_stages.begin(), wait_stages.end(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-         wait_stage_data = wait_stages.data();
-      }
-   }
-
-   VkSubmitInfo submit_info = {};
-   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-   submit_info.waitSemaphoreCount = semaphores.wait_semaphores_count;
-   submit_info.pWaitSemaphores = semaphores.wait_semaphores;
-   submit_info.pWaitDstStageMask = wait_stage_data;
-   submit_info.commandBufferCount = 1;
-   submit_info.pCommandBuffers = &data->copy_cmd;
-   submit_info.signalSemaphoreCount = semaphores.signal_semaphores_count;
-   submit_info.pSignalSemaphores = semaphores.signal_semaphores;
-
-   VkResult res = m_device_data.disp.QueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to submit copy command buffer: %d", res);
-      return res;
-   }
-
-   queue_submit_semaphores fence_semaphores = {
-      semaphores.signal_semaphores, semaphores.signal_semaphores_count, nullptr, 0
-   };
-   return data->present_fence.set_payload(queue, fence_semaphores, submission_pnext);
+   return data->present_fence.set_payload(queue, semaphores, submission_pnext, data->copy_cmd);
 }
 
 VkResult swapchain::image_wait_present(swapchain_image &image, uint64_t timeout)

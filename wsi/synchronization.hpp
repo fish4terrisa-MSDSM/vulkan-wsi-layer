@@ -97,11 +97,12 @@ public:
     * @param     queue  The Vulkan queue that may be used to submit synchronization commands.
     * @param     semaphores The wait and signal semaphores.
     * @param     submission_pnext   Chain of pointers to attach to the payload submission.
+    * @param     cmd_buf Optional command buffer to submit directly alongside the synchronizations.
     *
     * @return VK_SUCCESS on success or other error code on failing to set the payload.
     */
    VkResult set_payload(VkQueue queue, const queue_submit_semaphores &semaphores,
-                        const void *submission_pnext = nullptr);
+                        const void *submission_pnext = nullptr, VkCommandBuffer cmd_buf = VK_NULL_HANDLE);
 
 protected:
    /**
@@ -193,9 +194,10 @@ private:
  *                   of a fence to be signalled.
  * @param semaphores The wait and signal semaphores.
  * @param submission_pnext Chain of pointers to attach to the payload submission.
+ * @param cmd_buf    Optional command buffer to submit directly alongside the synchronizations.
  *
  * @return VK_SUCCESS on success, an appropiate error code otherwise.
  */
 VkResult sync_queue_submit(const layer::device_private_data &device, VkQueue queue, VkFence fence,
-                           const queue_submit_semaphores &semaphores, const void *submission_pnext = nullptr);
+                           const queue_submit_semaphores &semaphores, const void *submission_pnext = nullptr, VkCommandBuffer cmd_buf = VK_NULL_HANDLE);
 } /* namespace wsi */
