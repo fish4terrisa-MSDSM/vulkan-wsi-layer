@@ -175,9 +175,10 @@ VkResult sync_queue_submit(const layer::device_private_data &device, VkQueue que
    /* When the semaphore that comes in is signalled, we know that all work is done. So, we do not
     * want to block any future Vulkan queue work on it. So, we pass in BOTTOM_OF_PIPE bit as the
     * wait flag. But if we embed an actual copy command buffer, we should wait earlier so the
-    * copy has data ready. ALL_COMMANDS_BIT guarantees optimal sync stability when batched together.
+    * copy has data ready. TRANSFER_BIT guarantees optimal sync stability without stalling 
+    * the entire GPU pipeline when batched together.
     */
-   VkPipelineStageFlags pipeline_stage_flag = cmd_buf != VK_NULL_HANDLE ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+   VkPipelineStageFlags pipeline_stage_flag = cmd_buf != VK_NULL_HANDLE ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
    VkPipelineStageFlags *pipeline_stage_flag_data = &pipeline_stage_flag;
 
    util::vector<VkPipelineStageFlags> pipeline_stage_flags_vector{ util::allocator(

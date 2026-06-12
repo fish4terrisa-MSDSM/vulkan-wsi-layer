@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <chrono>
 #include <vulkan/vk_icd.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -44,6 +45,12 @@ private:
    xcb_connection_t *m_connection;
    xcb_window_t m_window;
    surface_properties properties;
+
+   /* Optimized size cache for eliminating blocking X11 IPC bottlenecks during polling */
+   uint32_t m_cached_width{ 0 };
+   uint32_t m_cached_height{ 0 };
+   int m_cached_depth{ 24 };
+   std::chrono::steady_clock::time_point m_last_query_time{};
 };
 
 } /* namespace x11 */

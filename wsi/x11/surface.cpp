@@ -1,5 +1,6 @@
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <chrono>
 #include "surface.hpp"
 #include "swapchain.hpp"
 #include "surface_properties.hpp"
@@ -35,16 +36,29 @@ bool surface::init()
 
 bool surface::get_size_and_depth(uint32_t *width, uint32_t *height, int *depth)
 {
-   auto cookie = xcb_get_geometry(m_connection, m_window);
-   if (auto *geom = xcb_get_geometry_reply(m_connection, cookie, nullptr))
+   auto now = std::chrono::steady_clock::now();
+   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_query_time).count();
+
+   /* Rate-limit the synchronous blocking xcb_get_geometry query to at most once 
+    * every 250 milliseconds. This eliminates massive IPC overhead when Zink 
+    * queries capabilities frequently during rendering or transitions. */
+   if (m_cached_width == 0 || elapsed > 250)
    {
-      *width = static_cast<uint32_t>(geom->width);
-      *height = static_cast<uint32_t>(geom->height);
-      *depth = static_cast<int>(geom->depth);
-      free(geom);
-      return true;
+      auto cookie = xcb_get_geometry(m_connection, m_window);
+      if (auto *geom = xcb_get_geometry_reply(m_connection, cookie, nullptr))
+      {
+         m_cached_width = static_cast<uint32_t>(geom->width);
+         m_cached_height = static_cast<uint32_t>(geom->height);
+         m_cached_depth = static_cast<int>(geom->depth);
+         free(geom);
+         m_last_query_time = now;
+      }
    }
-   return false;
+
+   *width = m_cached_width;
+   *height = m_cached_height;
+   *depth = m_cached_depth;
+   return m_cached_width != 0;
 }
 
 wsi::surface_properties &surface::get_properties()

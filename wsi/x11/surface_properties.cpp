@@ -109,11 +109,11 @@ VkResult surface_properties::get_surface_formats(VkPhysicalDevice physical_devic
 }
 
 VkResult surface_properties::get_surface_present_modes(VkPhysicalDevice physical_device, VkSurfaceKHR surface,
-                                                       uint32_t *present_mode_count, VkPresentModeKHR *present_modes)
+                                                       uint32_t *pPresentModeCount, VkPresentModeKHR *pPresentModes)
 {
    UNUSED(physical_device);
    UNUSED(surface);
-   return get_surface_present_modes_common(present_mode_count, present_modes, m_supported_modes);
+   return get_surface_present_modes_common(pPresentModeCount, pPresentModes, m_supported_modes);
 }
 
 static const char *required_device_extensions[] = {

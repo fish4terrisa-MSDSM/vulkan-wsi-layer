@@ -36,14 +36,24 @@ static int alloc_dma_heap(size_t size) {
         WSI_LOG_ERROR("Failed to open /dev/dma_heap/system");
         return -1;
     }
-    struct dma_heap_allocation_data heap_data = {
-        .len = size,
-        .fd_flags = O_RDWR | O_CLOEXEC,
-    };
+
+    /* DMA-BUF system heaps on Android strictly require the allocation length
+     * to be page-aligned. Unaligned sizes trigger EINVAL inside the ioctl. */
+    size_t page_size = 4096;
+    long sys_page_size = sysconf(_SC_PAGE_SIZE);
+    if (sys_page_size > 0) {
+        page_size = (size_t)sys_page_size;
+    }
+    size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+
+    struct dma_heap_allocation_data heap_data = {};
+    heap_data.len = aligned_size;
+    heap_data.fd_flags = O_RDWR | O_CLOEXEC;
+
     int ret = ioctl(fd, DMA_HEAP_IOCTL_ALLOC, &heap_data);
     close(fd);
     if (ret != 0) {
-        WSI_LOG_ERROR("DMA_HEAP_IOCTL_ALLOC failed");
+        WSI_LOG_ERROR("DMA_HEAP_IOCTL_ALLOC failed, size: %zu, aligned: %zu, errno: %d", size, aligned_size, errno);
         return -1;
     }
     return heap_data.fd;
