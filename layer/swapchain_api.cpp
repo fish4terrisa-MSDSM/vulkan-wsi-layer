@@ -363,10 +363,19 @@ wsi_layer_vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo, c
 
    if (image_sc_create_info == nullptr || !device_data.layer_owns_swapchain(image_sc_create_info->swapchain))
    {
-      // Force MUTABLE_FORMAT_BIT and ALIAS_BIT on all general images to workaround the Adreno UBWC flickering hardware bug
       VkImageCreateInfo modified_info = *pCreateInfo;
-      modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
       
+      // Force ALIAS_BIT as a reliable way to disable Adreno UBWC hardware bugs safely
+      modified_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
+
+      /*
+       * Despite my best effort, the adreno vulkan driver is so retarded
+       * that VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT must stay on no matter what,
+       * to disable ubwc at any cost. Otherwise it completely fk up the android side's graphic.
+       * Nice job, qualcomm.
+       */
+          modified_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
       // Override tiling to completely defeat UBWC overrides by DRM formats
       if (modified_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
          modified_info.tiling = VK_IMAGE_TILING_OPTIMAL;

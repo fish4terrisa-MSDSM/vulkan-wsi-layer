@@ -536,39 +536,20 @@ wsi_layer_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, 
    res = instance.disp.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &icdCount, props.data());
    if (res != VK_SUCCESS && res != VK_INCOMPLETE) return res;
 
-   const char* force_exts = std::getenv("WSI_FORCE_ENABLE_EXTENSIONS");
-   if (force_exts && strcmp(force_exts, "1") == 0) {
-       const char* extra_exts[] = {
-           "VK_EXT_conditional_rendering",
-           "VK_EXT_descriptor_buffer",
-           "VK_EXT_descriptor_heap",
-           "VK_KHR_shader_untyped_pointers",
-           "VK_KHR_dynamic_rendering_local_read",
-           "VK_KHR_fragment_shader_barycentric",
-           "VK_KHR_pipeline_library",
-           "VK_EXT_graphics_pipeline_library",
-           "VK_EXT_host_image_copy",
-           "VK_EXT_mesh_shader",
-           "VK_KHR_ray_tracing_pipeline",
-           "VK_EXT_shader_object",
-           "VK_KHR_swapchain_mutable_format"
-       };
-       for (const char* ext : extra_exts) {
-           bool found = false;
-           for (uint32_t i = 0; i < icdCount; ++i) {
-               if (strcmp(props[i].extensionName, ext) == 0) {
-                   found = true;
-                   break;
-               }
-           }
-           if (!found) {
-               VkExtensionProperties p = {};
-               strncpy(p.extensionName, ext, VK_MAX_EXTENSION_NAME_SIZE - 1);
-               p.extensionName[VK_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
-               p.specVersion = 1;
-               if (!props.try_push_back(p)) return VK_ERROR_OUT_OF_HOST_MEMORY;
-           }
+   // Emulate VK_KHR_swapchain_mutable_format if missing from underlying driver
+   bool found_mutable_format = false;
+   for (uint32_t i = 0; i < props.size(); ++i) {
+       if (strcmp(props[i].extensionName, "VK_KHR_swapchain_mutable_format") == 0) {
+           found_mutable_format = true;
+           break;
        }
+   }
+   if (!found_mutable_format) {
+       VkExtensionProperties p = {};
+       strncpy(p.extensionName, "VK_KHR_swapchain_mutable_format", VK_MAX_EXTENSION_NAME_SIZE - 1);
+       p.extensionName[VK_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
+       p.specVersion = 1;
+       if (!props.try_push_back(p)) return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
    if (pProperties == nullptr) {

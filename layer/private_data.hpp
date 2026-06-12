@@ -45,9 +45,12 @@
 #include <unordered_set>
 #include <cassert>
 #include <mutex>
+#include <shared_mutex>
 #include <limits>
 #include <cstring>
-using scoped_mutex = std::lock_guard<std::mutex>;
+
+using read_lock = std::shared_lock<std::shared_mutex>;
+using write_lock = std::unique_lock<std::shared_mutex>;
 
 /** Forward declare stored objects */
 namespace wsi
@@ -717,7 +720,7 @@ private:
    /**
     * @brief Lock for thread safe access to @ref surfaces
     */
-   std::mutex surfaces_lock;
+   mutable std::shared_mutex surfaces_lock;
 
    /**
     * @brief List with the names of the enabled instance extensions.
@@ -922,7 +925,7 @@ private:
 
    const util::allocator allocator;
    util::unordered_set<VkSwapchainKHR> swapchains;
-   mutable std::mutex swapchains_lock;
+   mutable std::shared_mutex swapchains_lock;
 
    /**
     * @brief List with the names of the enabled device extensions.
