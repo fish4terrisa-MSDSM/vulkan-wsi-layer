@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <linux/dma-heap.h>
 #include <algorithm>
+#include <poll.h>
 
 #include <util/timed_semaphore.hpp>
 #include <vulkan/vulkan_core.h>
@@ -79,8 +80,11 @@ swapchain::~swapchain()
    }
 
    if (m_connection && m_window && m_special_event) {
-      xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
-      xcb_flush(m_connection);
+      xcb_void_cookie_t cookie = xcb_present_notify_msc_checked(m_connection, m_window, 0, 0, 0, 0);
+      xcb_generic_error_t *err = xcb_request_check(m_connection, cookie);
+      if (err) {
+         free(err);
+      }
    }
 
    if (m_present_event_thread.joinable())
@@ -92,8 +96,12 @@ swapchain::~swapchain()
       xcb_unregister_for_special_event(m_connection, m_special_event);
       m_special_event = nullptr;
    }
-   if (m_event_id) {
-      xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
+   if (m_event_id && m_window) {
+      xcb_void_cookie_t cookie = xcb_present_select_input_checked(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
+      xcb_generic_error_t *err = xcb_request_check(m_connection, cookie);
+      if (err) {
+         free(err);
+      }
       m_event_id = 0;
    }
    xcb_flush(m_connection);
@@ -400,30 +408,43 @@ void swapchain::present_event_thread()
 
    while (m_present_event_thread_run)
    {
-      xcb_generic_event_t *event = xcb_wait_for_special_event(m_connection, m_special_event);
-      if (!event) break;
+      xcb_generic_event_t *event = xcb_poll_for_special_event(m_connection, m_special_event);
+      if (event) {
+         auto *ge = (xcb_present_generic_event_t *)event;
+         if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
+            auto *idle = (xcb_present_idle_notify_event_t *)event;
 
-      auto *ge = (xcb_present_generic_event_t *)event;
-      if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
-         auto *idle = (xcb_present_idle_notify_event_t *)event;
-
-         std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
-         for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
-            auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
-            if (image_data != nullptr && image_data->pixmap == idle->pixmap) {
-               unpresent_image(i);
-               break;
+            std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
+            for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
+               auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
+               if (image_data != nullptr && image_data->pixmap == idle->pixmap) {
+                  unpresent_image(i);
+                  break;
+               }
+            }
+         } else if (ge->evtype == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
+            std::unique_lock<std::mutex> lock(m_present_mutex);
+            if (m_outstanding_pixmaps > 0) {
+               m_outstanding_pixmaps--;
+               m_present_cond.notify_one();
             }
          }
-      } else if (ge->evtype == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
-         std::unique_lock<std::mutex> lock(m_present_mutex);
-         if (m_outstanding_pixmaps > 0) {
-            m_outstanding_pixmaps--;
-            m_present_cond.notify_one();
-         }
+
+         free(event);
+         continue;
       }
 
-      free(event);
+      struct pollfd pfd = {};
+      pfd.fd = xcb_get_file_descriptor(m_connection);
+      pfd.events = POLLIN;
+      int ret = poll(&pfd, 1, 10);
+      if (ret < 0 && errno == EINTR) {
+         continue;
+      }
+
+      if (xcb_connection_has_error(m_connection)) {
+         break;
+      }
    }
 }
 
