@@ -13,6 +13,8 @@ namespace wsi
 namespace x11
 {
 
+inline std::recursive_mutex g_xcb_mutex;
+
 class surface : public wsi::surface
 {
 public:

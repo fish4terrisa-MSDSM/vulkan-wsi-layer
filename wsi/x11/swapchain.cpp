@@ -95,19 +95,19 @@ swapchain::~swapchain()
    /* Call the base's teardown */
    teardown();
 
-   if (m_connection && m_window && m_special_event) {
-      xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
-   }
+   {
+      std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
 
-   if (m_special_event) {
-      xcb_unregister_for_special_event(m_connection, m_special_event);
-      m_special_event = nullptr;
+      if (m_connection && m_window) {
+         xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
+      }
+
+      if (m_event_id && m_window) {
+         xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
+         m_event_id = 0;
+      }
+      xcb_flush(m_connection);
    }
-   if (m_event_id && m_window) {
-      xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
-      m_event_id = 0;
-   }
-   xcb_flush(m_connection);
 
    if (m_command_pool != VK_NULL_HANDLE) {
       m_device_data.disp.DestroyCommandPool(m_device, m_command_pool, get_allocation_callbacks());
@@ -134,6 +134,8 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
    }
 
    m_dri3_presenter = std::move(dri3);
+
+   std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
 
    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(m_connection, &xcb_present_id);
    if (!ext || !ext->present) {
@@ -412,7 +414,11 @@ void swapchain::present_event_thread_func(std::shared_ptr<event_thread_context> 
 {
    while (ctx->run)
    {
-      xcb_generic_event_t *event = xcb_poll_for_special_event(conn, special_event);
+      xcb_generic_event_t *event = nullptr;
+      {
+         std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+         event = xcb_poll_for_special_event(conn, special_event);
+      }
       if (event) {
          std::unique_lock<std::recursive_mutex> lock(ctx->mutex);
          if (ctx->sc) {
@@ -432,9 +438,18 @@ void swapchain::present_event_thread_func(std::shared_ptr<event_thread_context> 
          continue;
       }
 
-      if (xcb_connection_has_error(conn)) {
-         break;
+      {
+         std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+         if (xcb_connection_has_error(conn)) {
+            break;
+         }
       }
+   }
+
+   {
+      std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+      xcb_unregister_for_special_event(conn, special_event);
+      xcb_flush(conn);
    }
 }
 

@@ -60,6 +60,7 @@ bool surface::get_size_and_depth(uint32_t *width, uint32_t *height, int *depth)
     * XCB connection thread-safety. */
    if (m_cached_width == 0 || elapsed > 1000)
    {
+      std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
       auto cookie = xcb_get_geometry(m_connection, m_window);
       if (auto *geom = xcb_get_geometry_reply(m_connection, cookie, nullptr))
       {

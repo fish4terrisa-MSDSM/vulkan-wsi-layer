@@ -29,6 +29,8 @@ bool dri3_presenter::query_dri3_present(xcb_connection_t *connection)
       return supported;
    }
 
+   std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+
    auto dri3_cookie = xcb_dri3_query_version(connection, 1, 2);
    auto *dri3_reply = xcb_dri3_query_version_reply(connection, dri3_cookie, nullptr);
    if (!dri3_reply)
@@ -98,6 +100,8 @@ VkResult dri3_presenter::create_image_resources(x11_image_data *image_data, uint
    // termux-x11 accepts 32bpp for xcb_dri3_pixmap_from_buffers mapped DMA_BUFs
    uint8_t bpp = 32;
 
+   std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+
    xcb_pixmap_t pixmap = xcb_generate_id(m_connection);
 
    // Unchecked call used here to avoid massively stalling the caller waiting for the round trip latency. 
@@ -121,6 +125,8 @@ VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t seri
       return VK_ERROR_SURFACE_LOST_KHR;
    }
 
+   std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
+
    m_present_serial++;
 
    uint32_t options = XCB_PRESENT_OPTION_NONE;
@@ -140,6 +146,7 @@ VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t seri
 
 void dri3_presenter::destroy_image_resources(x11_image_data *image_data)
 {
+   std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
    if (m_connection && image_data->pixmap != XCB_PIXMAP_NONE)
    {
       xcb_free_pixmap(m_connection, image_data->pixmap);
