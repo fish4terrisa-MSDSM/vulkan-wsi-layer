@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <chrono>
+#include <mutex>
 #include <vulkan/vk_icd.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -51,6 +52,7 @@ private:
    uint32_t m_cached_height{ 0 };
    int m_cached_depth{ 24 };
    std::chrono::steady_clock::time_point m_last_query_time{};
+   std::mutex m_query_mutex;
 };
 
 } /* namespace x11 */

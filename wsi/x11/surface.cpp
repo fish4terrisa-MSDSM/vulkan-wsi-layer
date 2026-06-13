@@ -37,12 +37,28 @@ bool surface::init()
 bool surface::get_size_and_depth(uint32_t *width, uint32_t *height, int *depth)
 {
    auto now = std::chrono::steady_clock::now();
+
+   /* Thread-safe, lock-free cached read if requested within 1000ms */
+   if (m_cached_width != 0)
+   {
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_query_time).count();
+      if (elapsed <= 1000)
+      {
+         *width = m_cached_width;
+         *height = m_cached_height;
+         *depth = m_cached_depth;
+         return true;
+      }
+   }
+
+   std::lock_guard<std::mutex> lock(m_query_mutex);
    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_query_time).count();
 
    /* Rate-limit the synchronous blocking xcb_get_geometry query to at most once 
-    * every 250 milliseconds. This eliminates massive IPC overhead when Zink 
-    * queries capabilities frequently during rendering or transitions. */
-   if (m_cached_width == 0 || elapsed > 250)
+    * every 1000 milliseconds. This eliminates massive IPC overhead when Zink 
+    * queries capabilities frequently during rendering or transitions, and protects
+    * XCB connection thread-safety. */
+   if (m_cached_width == 0 || elapsed > 1000)
    {
       auto cookie = xcb_get_geometry(m_connection, m_window);
       if (auto *geom = xcb_get_geometry_reply(m_connection, cookie, nullptr))

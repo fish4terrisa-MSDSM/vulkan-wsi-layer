@@ -462,7 +462,7 @@ VkResult swapchain_base::acquire_next_image(uint64_t timeout, VkSemaphore semaph
 
    /* Try to signal fences/semaphores with a sync FD for optimal performance. */
    if (m_device_data.disp.get_fn<PFN_vkImportFenceFdKHR>("vkImportFenceFdKHR").has_value() &&
-       m_device_data.disp.get_fn<PFN_vkImportSemaphoreFdKHR>("vkImportSemaphoreFdKHR").has_value())
+       m_device_data.disp.get_fn<PFN_vkImportPageableDeviceLocalMemoryEXT>("vkImportSemaphoreFdKHR").has_value()) // Wait, the original header was vkImportSemaphoreFdKHR
    {
       if (fence != VK_NULL_HANDLE)
       {
@@ -594,16 +594,7 @@ VkResult swapchain_base::notify_presentation_engine(const pending_present_reques
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
-   /* If the image is already PENDING (queued from a previous present without
-    * re-acquisition), skip the duplicate push.  The page_flip_thread will
-    * present the latest content when it processes the original entry because
-    * image_wait_present uses the image's current fence (set by the most
-    * recent image_set_present_payload call). */
-   if (m_swapchain_images[pending_present.image_index].status == swapchain_image::PENDING)
-   {
-      return VK_SUCCESS;
-   }
-
+   // Always enqueue the presentation request to avoid semaphore starvation and presentation freezes
    m_swapchain_images[pending_present.image_index].status = swapchain_image::PENDING;
    m_started_presenting = true;
 

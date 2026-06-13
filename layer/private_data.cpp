@@ -32,10 +32,20 @@
 #include "util/helpers.hpp"
 #include "util/macros.hpp"
 
+#include <atomic>
+#include <utility>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define WSI_LIKELY(x) __builtin_expect(!!(x), 1)
+#else
+#define WSI_LIKELY(x) (x)
+#endif
+
 namespace layer
 {
 
 static std::shared_mutex g_data_lock;
+static std::atomic<uint64_t> g_data_version{ 1 };
 
 /* The dictionaries below use plain pointers to store the instance/device private data objects.
  * This means that these objects are leaked if the application terminates without calling vkDestroyInstance
@@ -223,6 +233,7 @@ VkResult instance_private_data::associate(VkInstance instance, instance_dispatch
    if (result.has_value())
    {
       instance_data.release(); // NOLINT(bugprone-unused-return-value)
+      g_data_version.fetch_add(1, std::memory_order_seq_cst);
       return VK_SUCCESS;
    }
    else
@@ -251,14 +262,29 @@ void instance_private_data::disassociate(VkInstance instance)
       g_instance_data.erase(it);
    }
 
+   g_data_version.fetch_add(1, std::memory_order_seq_cst);
    destroy(instance_data);
 }
 
 template <typename dispatchable_type>
 static instance_private_data &get_instance_private_data(dispatchable_type dispatchable_object)
 {
+   void* key = get_key(dispatchable_object);
+   thread_local void* tls_key = nullptr;
+   thread_local instance_private_data* tls_data = nullptr;
+   thread_local uint64_t tls_ver = 0;
+
+   uint64_t global_ver = g_data_version.load(std::memory_order_relaxed);
+   if (WSI_LIKELY(key == tls_key && tls_data != nullptr && tls_ver == global_ver)) {
+      return *tls_data;
+   }
+
    read_lock lock(g_data_lock);
-   return *g_instance_data.at(get_key(dispatchable_object));
+   instance_private_data* data = g_instance_data.at(key);
+   tls_key = key;
+   tls_data = data;
+   tls_ver = global_ver;
+   return *data;
 }
 
 instance_private_data &instance_private_data::get(VkInstance instance)
@@ -453,6 +479,7 @@ VkResult device_private_data::associate(VkDevice dev, instance_private_data &ins
    if (result.has_value())
    {
       device_data.release(); // NOLINT(bugprone-unused-return-value)
+      g_data_version.fetch_add(1, std::memory_order_seq_cst);
       return VK_SUCCESS;
    }
    else
@@ -481,15 +508,29 @@ void device_private_data::disassociate(VkDevice dev)
       g_device_data.erase(it);
    }
 
+   g_data_version.fetch_add(1, std::memory_order_seq_cst);
    destroy(device_data);
 }
 
 template <typename dispatchable_type>
 static device_private_data &get_device_private_data(dispatchable_type dispatchable_object)
 {
-   read_lock lock(g_data_lock);
+   void* key = get_key(dispatchable_object);
+   thread_local void* tls_key = nullptr;
+   thread_local device_private_data* tls_data = nullptr;
+   thread_local uint64_t tls_ver = 0;
 
-   return *g_device_data.at(get_key(dispatchable_object));
+   uint64_t global_ver = g_data_version.load(std::memory_order_relaxed);
+   if (WSI_LIKELY(key == tls_key && tls_data != nullptr && tls_ver == global_ver)) {
+      return *tls_data;
+   }
+
+   read_lock lock(g_data_lock);
+   device_private_data* data = g_device_data.at(key);
+   tls_key = key;
+   tls_data = data;
+   tls_ver = global_ver;
+   return *data;
 }
 
 device_private_data &device_private_data::get(VkDevice device)
@@ -601,4 +642,4 @@ bool device_private_data::is_swapchain_maintenance1_enabled() const
    return swapchain_maintenance1_enabled;
 }
 
-} /* namespace layer */
+   } /* namespace layer */

@@ -377,8 +377,26 @@ wsi_layer_vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo, c
       modified_info.flags |= VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
       // Override tiling to completely defeat UBWC overrides by DRM formats
+      VkExternalMemoryImageCreateInfoKHR local_ext_info;
+      bool has_ext_info = false;
+
       if (modified_info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
          modified_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+
+         // Rebuild pNext chain excluding DRM modifier descriptors to prevent driver stalls
+         const auto *ext_info = util::find_extension<VkExternalMemoryImageCreateInfoKHR>(
+            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR, pCreateInfo->pNext);
+         if (ext_info != nullptr) {
+            local_ext_info = *ext_info;
+            local_ext_info.pNext = nullptr;
+            has_ext_info = true;
+         }
+
+         if (has_ext_info) {
+            modified_info.pNext = &local_ext_info;
+         } else {
+            modified_info.pNext = nullptr;
+         }
       }
 
       return device_data.disp.CreateImage(device_data.device, &modified_info, pAllocator, pImage);
