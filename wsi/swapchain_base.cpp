@@ -58,7 +58,7 @@ void swapchain_base::page_flip_thread()
    auto &sc_images = m_swapchain_images;
    VkResult vk_res = VK_SUCCESS;
    uint64_t timeout = UINT64_MAX;
-   constexpr uint64_t SEMAPHORE_TIMEOUT = 250000000; /* 250 ms. */
+   constexpr uint64_t SEMAPHORE_TIMEOUT = 10000000; /* 10 ms. */
 
    /* No mutex is needed for the accesses to m_page_flip_thread_run variable as after the variable is
     * initialized it is only ever changed to false. The while loop will make the thread read the
