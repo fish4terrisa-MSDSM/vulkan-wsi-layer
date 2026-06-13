@@ -365,7 +365,11 @@ void swapchain_base::teardown()
    if (m_queue != VK_NULL_HANDLE)
    {
       /* Make sure the vkFences are done signaling. */
-      m_device_data.disp.QueueWaitIdle(m_queue);
+      /* Do NOT use QueueWaitIdle to avoid massive stalls! Wait for individual image fences instead. */
+      for (auto &img : m_swapchain_images)
+      {
+         image_wait_present(img, UINT64_MAX);
+      }
    }
 
    /* We are safe to destroy everything. */
@@ -373,6 +377,9 @@ void swapchain_base::teardown()
    {
       /* Tell flip thread to end. */
       m_page_flip_thread_run = false;
+      
+      /* Wake up the page flip thread immediately so it doesn't wait for the 250ms timeout. */
+      m_page_flip_semaphore.post();
 
       if (m_page_flip_thread.joinable())
       {
