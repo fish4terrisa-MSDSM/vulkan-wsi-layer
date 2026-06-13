@@ -462,7 +462,7 @@ VkResult swapchain_base::acquire_next_image(uint64_t timeout, VkSemaphore semaph
 
    /* Try to signal fences/semaphores with a sync FD for optimal performance. */
    if (m_device_data.disp.get_fn<PFN_vkImportFenceFdKHR>("vkImportFenceFdKHR").has_value() &&
-       m_device_data.disp.get_fn<PFN_vkImportPageableDeviceLocalMemoryEXT>("vkImportSemaphoreFdKHR").has_value()) // Wait, the original header was vkImportSemaphoreFdKHR
+       m_device_data.disp.get_fn<PFN_vkImportSemaphoreFdKHR>("vkImportSemaphoreFdKHR").has_value())
    {
       if (fence != VK_NULL_HANDLE)
       {
@@ -731,7 +731,12 @@ void swapchain_base::wait_for_pending_buffers()
    while (wait > 0)
    {
       /* Take down one free image semaphore. */
-      wait_for_free_buffer(UINT64_MAX);
+      VkResult res = wait_for_free_buffer(2000000000ULL); /* 2 seconds timeout to prevent deadlocks */
+      if (res == VK_TIMEOUT || res == VK_ERROR_OUT_OF_HOST_MEMORY || res == VK_ERROR_SURFACE_LOST_KHR)
+      {
+         WSI_LOG_WARNING("wait_for_pending_buffers timed out or failed, proceeding with teardown anyway.");
+         break;
+      }
       --wait;
    }
 }

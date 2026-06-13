@@ -72,6 +72,10 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
 
 swapchain::~swapchain()
 {
+   /* Call the base's teardown first while X11 presentation event thread is still active.
+    * This allows pending buffers to be released and marked as FREE properly, preventing deadlocks. */
+   teardown();
+
    m_present_event_thread_run = false;
    {
       std::unique_lock<std::mutex> lock(m_present_mutex);
@@ -110,14 +114,13 @@ swapchain::~swapchain()
       m_device_data.disp.DestroyCommandPool(m_device, m_command_pool, get_allocation_callbacks());
       m_command_pool = VK_NULL_HANDLE;
    }
-
-   teardown();
 }
 
 VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKHR *swapchain_create_info,
                                   bool &use_presentation_thread)
 {
    UNUSED(device);
+   UNUSED(swapchain_create_info);
    use_presentation_thread = true;
 
    auto dri3 = std::make_unique<dri3_presenter>();
@@ -490,8 +493,6 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
 
       image.status = wsi::swapchain_image::INVALID;
    }
-
-   image_status_lock.unlock();
 
    if (image.data != nullptr)
    {
