@@ -75,6 +75,7 @@ VkResult dri3_presenter::init(xcb_connection_t *connection, xcb_window_t window,
 VkResult dri3_presenter::create_image_resources(x11_image_data *image_data, uint32_t width, uint32_t height,
                                                 int depth, uint32_t stride, uint32_t fourcc, uint64_t modifier)
 {
+   UNUSED(fourcc);
    if (!m_connection)
    {
       return VK_ERROR_INITIALIZATION_FAILED;
