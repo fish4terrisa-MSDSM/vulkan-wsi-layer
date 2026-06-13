@@ -22,10 +22,18 @@ dri3_presenter::~dri3_presenter() {}
 
 bool dri3_presenter::query_dri3_present(xcb_connection_t *connection)
 {
+   static bool checked = false;
+   static bool supported = false;
+
+   if (checked) {
+      return supported;
+   }
+
    auto dri3_cookie = xcb_dri3_query_version(connection, 1, 2);
    auto *dri3_reply = xcb_dri3_query_version_reply(connection, dri3_cookie, nullptr);
    if (!dri3_reply)
    {
+      checked = true;
       return false;
    }
    uint32_t dri3_major = dri3_reply->major_version;
@@ -33,6 +41,7 @@ bool dri3_presenter::query_dri3_present(xcb_connection_t *connection)
 
    if (dri3_major < 1)
    {
+      checked = true;
       return false;
    }
 
@@ -40,10 +49,13 @@ bool dri3_presenter::query_dri3_present(xcb_connection_t *connection)
    auto *present_reply = xcb_present_query_version_reply(connection, present_cookie, nullptr);
    if (!present_reply)
    {
+      checked = true;
       return false;
    }
    free(present_reply);
 
+   checked = true;
+   supported = true;
    return true;
 }
 
@@ -87,16 +99,9 @@ VkResult dri3_presenter::create_image_resources(x11_image_data *image_data, uint
 
    xcb_pixmap_t pixmap = xcb_generate_id(m_connection);
 
-   xcb_void_cookie_t cookie = xcb_dri3_pixmap_from_buffers_checked(m_connection, pixmap, m_window,
+   // Unchecked call used here to avoid massively stalling the caller waiting for the round trip latency. 
+   xcb_dri3_pixmap_from_buffers(m_connection, pixmap, m_window,
                                 1, width, height, stride, 0, 0, 0, 0, 0, 0, 0, depth, bpp, modifier, &fd_for_dri3);
-
-   xcb_generic_error_t *err = xcb_request_check(m_connection, cookie);
-   if (err)
-   {
-      WSI_LOG_ERROR("dri3_presenter: pixmap creation failed (X11 error %d)", err->error_code);
-      free(err);
-      return VK_ERROR_INITIALIZATION_FAILED;
-   }
 
    image_data->pixmap = pixmap;
    image_data->width = width;

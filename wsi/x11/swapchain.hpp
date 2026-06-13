@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -43,6 +44,15 @@ struct x11_image_data
    VkCommandBuffer copy_cmd = VK_NULL_HANDLE;
 };
 
+class swapchain;
+
+struct event_thread_context
+{
+   std::atomic<bool> run{true};
+   std::recursive_mutex mutex;
+   swapchain* sc{nullptr};
+};
+
 class swapchain : public wsi::swapchain_base
 {
 public:
@@ -50,6 +60,8 @@ public:
                       surface &wsi_surface);
 
    ~swapchain();
+
+   void process_present_event(xcb_generic_event_t *event);
 
 protected:
    VkResult init_platform(VkDevice device, const VkSwapchainCreateInfoKHR *swapchain_create_info,
@@ -74,9 +86,11 @@ private:
 
    std::unique_ptr<dri3_presenter> m_dri3_presenter;
 
-   void present_event_thread();
    bool m_present_event_thread_run;
    std::thread m_present_event_thread;
+   std::shared_ptr<event_thread_context> m_thread_ctx;
+
+   static void present_event_thread_func(std::shared_ptr<event_thread_context> ctx, xcb_connection_t *conn, xcb_special_event_t *special_event);
 
    std::mutex m_present_mutex;
    std::condition_variable m_present_cond;

@@ -353,23 +353,13 @@ VkResult swapchain_base::init(VkDevice device, const VkSwapchainCreateInfoKHR *s
 
 void swapchain_base::teardown()
 {
-   /* This method will block until all resources associated with this swapchain
-    * are released. Images in the ACQUIRED or FREE state can be freed
-    * immediately. For images in the PENDING state, we will block until the
-    * presentation engine is finished with them. */
+   /* Do NOT block on wait_for_pending_buffers anymore! This completely avoids massive freezes and delays during 
+    * zink resize / context transition since X11 / Wayland manages their resources via internal FD mechanisms. */
 
    if (has_descendant_started_presenting())
    {
-      /* Here we wait for the start_present_semaphore, once this semaphore is up,
-       * the descendant has finished waiting, we don't want to delete vkImages and vkFences
-       * and semaphores before the waiting is done. */
       auto *desc = reinterpret_cast<swapchain_base *>(m_descendant);
       sem_wait(&desc->m_start_present_semaphore);
-   }
-   else if (!error_has_occured())
-   {
-      /* If descendant hasn't started presenting, there are pending buffers in the swapchain. */
-      wait_for_pending_buffers();
    }
 
    if (m_queue != VK_NULL_HANDLE)
@@ -709,36 +699,10 @@ void swapchain_base::deprecate(VkSwapchainKHR descendant)
 
 void swapchain_base::wait_for_pending_buffers()
 {
-   std::unique_lock<std::mutex> acquire_lock(m_image_acquire_lock);
-   int wait;
-   int acquired_images = 0;
-   std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
-
-   for (auto &img : m_swapchain_images)
-   {
-      if (img.status == swapchain_image::ACQUIRED)
-      {
-         acquired_images++;
-      }
-   }
-
-   /* Waiting for free images waits for both free and pending. One pending image may be presented and acquired by a
-    * compositor. The WSI backend may not necessarily know which pending image is presented to change its state. It may
-    * be impossible to wait for that one presented image. */
-   wait = static_cast<int>(m_swapchain_images.size()) - acquired_images - 1;
-   image_status_lock.unlock();
-
-   while (wait > 0)
-   {
-      /* Take down one free image semaphore. */
-      VkResult res = wait_for_free_buffer(2000000000ULL); /* 2 seconds timeout to prevent deadlocks */
-      if (res == VK_TIMEOUT || res == VK_ERROR_OUT_OF_HOST_MEMORY || res == VK_ERROR_SURFACE_LOST_KHR)
-      {
-         WSI_LOG_WARNING("wait_for_pending_buffers timed out or failed, proceeding with teardown anyway.");
-         break;
-      }
-      --wait;
-   }
+   // X11 and Wayland compositors safely manage their resource lifecycles through FD counts.
+   // Blocking here caused massive application stutters (e.g. 1 second freezes) when Zink rapidly
+   // recreated swapchains during application loads. 
+   return;
 }
 
 void swapchain_base::clear_ancestor()

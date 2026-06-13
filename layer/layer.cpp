@@ -286,7 +286,7 @@ VKAPI_ATTR VkResult create_device(VkPhysicalDevice physicalDevice, const VkDevic
             if (application_frame_boundary_features)
             {
                if (application_frame_boundary_features->frameBoundary == VK_FALSE)
-               {
+                  {
                   /* The original features cannot be modified as they are marked as constant.
                    * Additionally, it is not possible to unlink this extension from the pNext
                    * chain as all other passed structures are also marked as const. We'll take
@@ -619,7 +619,6 @@ wsi_layer_vkGetDeviceProcAddr(VkDevice device, const char *funcName) VWL_API_POS
 
    GET_PROC_ADDR(vkCreateImage);
    GET_PROC_ADDR(vkBindImageMemory2);
-   GET_PROC_ADDR(vkCreateGraphicsPipelines);
 
    /* VK_EXT_swapchain_maintenance1 */
    if (layer::device_private_data::get(device).is_device_extension_enabled(

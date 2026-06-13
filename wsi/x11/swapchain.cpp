@@ -72,9 +72,12 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
 
 swapchain::~swapchain()
 {
-   /* Call the base's teardown first while X11 presentation event thread is still active.
-    * This allows pending buffers to be released and marked as FREE properly, preventing deadlocks. */
-   teardown();
+   // Disconnect swapchain reference from the detached thread to prevent use-after-free
+   if (m_thread_ctx) {
+      std::unique_lock<std::recursive_mutex> lock(m_thread_ctx->mutex);
+      m_thread_ctx->run = false;
+      m_thread_ctx->sc = nullptr;
+   }
 
    m_present_event_thread_run = false;
    {
@@ -83,17 +86,17 @@ swapchain::~swapchain()
       m_present_cond.notify_all();
    }
 
-   if (m_connection && m_window && m_special_event) {
-      xcb_void_cookie_t cookie = xcb_present_notify_msc_checked(m_connection, m_window, 0, 0, 0, 0);
-      xcb_generic_error_t *err = xcb_request_check(m_connection, cookie);
-      if (err) {
-         free(err);
-      }
-   }
-
    if (m_present_event_thread.joinable())
    {
-      m_present_event_thread.join();
+      // Detach instead of join to safely handle destruction under X11 Display Lock (XLockDisplay)
+      m_present_event_thread.detach();
+   }
+
+   /* Call the base's teardown */
+   teardown();
+
+   if (m_connection && m_window && m_special_event) {
+      xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
    }
 
    if (m_special_event) {
@@ -101,11 +104,7 @@ swapchain::~swapchain()
       m_special_event = nullptr;
    }
    if (m_event_id && m_window) {
-      xcb_void_cookie_t cookie = xcb_present_select_input_checked(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
-      xcb_generic_error_t *err = xcb_request_check(m_connection, cookie);
-      if (err) {
-         free(err);
-      }
+      xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
       m_event_id = 0;
    }
    xcb_flush(m_connection);
@@ -153,9 +152,13 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
 
    WSI_LOG_INFO("x11 swapchain: Successfully initialized termux-x11 DRI3 presenter");
 
+   m_thread_ctx = std::make_shared<event_thread_context>();
+   m_thread_ctx->sc = this;
+   m_thread_ctx->run = true;
+
    try
    {
-      m_present_event_thread = std::thread(&swapchain::present_event_thread, this);
+      m_present_event_thread = std::thread(present_event_thread_func, m_thread_ctx, m_connection, m_special_event);
    }
    catch (...)
    {
@@ -405,48 +408,55 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    return VK_SUCCESS;
 }
 
-void swapchain::present_event_thread()
+void swapchain::present_event_thread_func(std::shared_ptr<event_thread_context> ctx, xcb_connection_t *conn, xcb_special_event_t *special_event)
 {
-   m_present_event_thread_run = true;
-
-   while (m_present_event_thread_run)
+   while (ctx->run)
    {
-      xcb_generic_event_t *event = xcb_poll_for_special_event(m_connection, m_special_event);
+      xcb_generic_event_t *event = xcb_poll_for_special_event(conn, special_event);
       if (event) {
-         auto *ge = (xcb_present_generic_event_t *)event;
-         if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
-            auto *idle = (xcb_present_idle_notify_event_t *)event;
-
-            std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
-            for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
-               auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
-               if (image_data != nullptr && image_data->pixmap == idle->pixmap) {
-                  unpresent_image(i);
-                  break;
-               }
-            }
-         } else if (ge->evtype == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
-            std::unique_lock<std::mutex> lock(m_present_mutex);
-            if (m_outstanding_pixmaps > 0) {
-               m_outstanding_pixmaps--;
-               m_present_cond.notify_one();
-            }
+         std::unique_lock<std::recursive_mutex> lock(ctx->mutex);
+         if (ctx->sc) {
+            ctx->sc->process_present_event(event);
          }
+         lock.unlock();
 
          free(event);
          continue;
       }
 
       struct pollfd pfd = {};
-      pfd.fd = xcb_get_file_descriptor(m_connection);
+      pfd.fd = xcb_get_file_descriptor(conn);
       pfd.events = POLLIN;
       int ret = poll(&pfd, 1, 10);
       if (ret < 0 && errno == EINTR) {
          continue;
       }
 
-      if (xcb_connection_has_error(m_connection)) {
+      if (xcb_connection_has_error(conn)) {
          break;
+      }
+   }
+}
+
+void swapchain::process_present_event(xcb_generic_event_t *event)
+{
+   auto *ge = (xcb_present_generic_event_t *)event;
+   if (ge->evtype == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
+      auto *idle = (xcb_present_idle_notify_event_t *)event;
+
+      std::unique_lock<std::recursive_mutex> image_status_lock(m_image_status_mutex);
+      for (uint32_t i = 0; i < m_swapchain_images.size(); i++) {
+         auto image_data = static_cast<x11_image_data *>(m_swapchain_images[i].data);
+         if (image_data != nullptr && image_data->pixmap == idle->pixmap) {
+            unpresent_image(i);
+            break;
+         }
+      }
+   } else if (ge->evtype == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
+      std::unique_lock<std::mutex> lock(m_present_mutex);
+      if (m_outstanding_pixmaps > 0) {
+         m_outstanding_pixmaps--;
+         m_present_cond.notify_one();
       }
    }
 }
@@ -493,6 +503,8 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
 
       image.status = wsi::swapchain_image::INVALID;
    }
+
+   image_status_lock.unlock();
 
    if (image.data != nullptr)
    {
