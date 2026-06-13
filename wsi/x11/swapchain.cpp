@@ -99,11 +99,11 @@ swapchain::~swapchain()
       std::lock_guard<std::recursive_mutex> xcb_lock(g_xcb_mutex);
 
       if (m_connection && m_window) {
-         xcb_present_notify_msc(m_connection, m_window, 0, 0, 0, 0);
+         xcb_present_notify_msc_checked(m_connection, m_window, 0, 0, 0, 0);
       }
 
       if (m_event_id && m_window) {
-         xcb_present_select_input(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
+         xcb_present_select_input_checked(m_connection, m_event_id, m_window, XCB_PRESENT_EVENT_MASK_NO_EVENT);
          m_event_id = 0;
       }
       xcb_flush(m_connection);
@@ -329,7 +329,7 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    if (res != VK_SUCCESS) {
       WSI_LOG_ERROR("Failed to allocate copy command buffer");
       return res;
-   }
+}
 
    VkCommandBufferBeginInfo begin_info = {};
    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

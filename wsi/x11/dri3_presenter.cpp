@@ -136,9 +136,9 @@ VkResult dri3_presenter::present_image(x11_image_data *image_data, uint32_t seri
       options |= XCB_PRESENT_OPTION_ASYNC;
    }
 
-   xcb_present_pixmap(m_connection, m_window, image_data->pixmap, m_present_serial,
-                      XCB_NONE, XCB_NONE, 0, 0, XCB_NONE, XCB_NONE, XCB_NONE,
-                      options, 0, 0, 0, 0, nullptr);
+   xcb_present_pixmap_checked(m_connection, m_window, image_data->pixmap, m_present_serial,
+                              XCB_NONE, XCB_NONE, 0, 0, XCB_NONE, XCB_NONE, XCB_NONE,
+                              options, 0, 0, 0, 0, nullptr);
 
    xcb_flush(m_connection);
    return VK_SUCCESS;
