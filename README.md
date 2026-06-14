@@ -18,11 +18,12 @@ DRI3 x11 wsi(which is probably only designed for Xwayland anyway)
 It also added some hacks around the qualcomm driver, mainly disabled UBWC because
 it's causing serious problems on my test device (Adreno 740)
 
-It will not work with turnip, but you probably dont need it when you are using turnip.
+It will not work with turnip(because some dma-buf related problems), but you probably wont need it when you are using turnip.
 
 This wsi layer works well with zink, however the performance is not great tho.
 (Mostly because zink loves to create tons of pipelines, when creating and destroying
 pipelines are actually quite expensive in qualcomm's driver)
+
 ## Compatible driver versions
 I'm not sure if the EULA of qualcomm's drivers allows me to redistribute the binaries
 (probably not) and if it even allow me to share the url of drivers, but I assume not.
@@ -57,6 +58,13 @@ on a device with Adreno 740.
 ## Potential problems
 Because the workarounds I used and the unstable nature of qualcomm's driver, there might
 be some stability issues around that I didnt notice. Feel free to report it in issues.
+
+## Todo
+ - Have some compile time cmake option to control whether to apply the workarounds for Adrno 740(so on devices where it's fine to use ubwc we can use it)
+ - Remove useless hacks which are introduced while debugging but dont do anything other than slowing down the performance
+ - More tests
+ - Better Zink performance(and just overall performance improvement)
+ - Deslop the code
 
 ## AI Usage
 AI is used in this layer's development.
@@ -104,7 +112,7 @@ You see qualcomm's driver actually does offer quite the performance some version
 drivers doesnt offer. It's also better to have multiple choices so when Turnip broke
 something you rely on u can have something to switch to.
 Also it's cool.
-- You used AI in this??? UNFORGIVEABLE!!! YOU SHOULD GO TO HELL!
+- You used AI in this??? UNFORGIVABLE!!! YOU SHOULD GO TO HELL!
 Erm... OK. ~~(I kinda like hot demon girls ngl)~~
 Seriously tho this repo is only meant to be a poc, and I'm just someone who kinda
 knows what's going on and how to do it but dont really have the time&knowledge to
