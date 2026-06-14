@@ -85,42 +85,51 @@ AI is used in this layer's development.
 
 ## Q&A
 - Does this layer works with Mali devices?
+
 No...? Never tested with a Mali device, it could work but with those Adreno hacks there
 it's unlikely. However you can give it a try and figure out things while debugging.
 (Now think about it I've never owned a Mali phone, like ever)
 - Does it work with devices other than Adreno 740?
+
 Yes I believe, those drivers I listed seem to support far more devices than they claim,
 tho it's not tested.
 If you tested it on your device and it works, then feel free to open an issue to report
 this discovery so we can have better document about it.
 - Does it work with proot or chroot?
+
 Proot? I'm not so sure. If you have access to `/dev/dma_heap/system` then it should work.
 Chroot should work since I'm testing it with LXC, which is kinda like a fancy chroot with
 namespace.
 - How's the performance compared with Turnip?
+
 It depends on the driver version you are using and the turnip driver version you are comparing to. It also depends on the device you are testing it on.
 In my case I usually see 1.5x-1.8x better performance compared with Turnip(from mesa
 25.2.5), tho compared with Turnip 26.1.2 it's slower. However the performance of Turnip
 in 26.1.2 doesnt seem to be reliable or stable so idk.
 - Does it work with a normal X11 server running with DRM/KMS?
+
 Emm... Maybe? I cannot get xserver to display anything on the screen with modesetting,
 so I really dont know, but with lorie patches from termux-x11 in theory it should
 work.
 - Did u test it with real world workloads?
+
 Yes, I tested with webgl tests inside chromium and minecraft. There arent any major 
 glitches spotted(I mean, not anymore) so I believe it's enough to release it.
 - Wait it caused a termux-x11 segfault
+
 Yeah this is spotted in my tests, tho it rarely happens and there arent really any
 clues about how this happened. My theory is something in the xserver part has gone wrong
 but I'm not so sure. It really doesnt happen often tho and I havent yet experienced once
 it crashed in front of my face(it's always when termux-x11 is running in background) so
 it's not like that big of an issue for now.
 - But why when we already have Turnip for Adreno devices?
+
 You see qualcomm's driver actually does offer quite the performance some versions of Turnip
 drivers doesnt offer. It's also better to have multiple choices so when Turnip broke
 something you rely on u can have something to switch to.
 Also it's cool.
 - You used AI in this??? UNFORGIVABLE!!! YOU SHOULD GO TO HELL!
+
 Erm... OK. ~~(I kinda like hot demon girls ngl)~~
 Seriously tho this repo is only meant to be a poc, and I'm just someone who kinda
 knows what's going on and how to do it but dont really have the time&knowledge to
