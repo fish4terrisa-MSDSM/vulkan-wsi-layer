@@ -24,6 +24,12 @@ This wsi layer works well with zink, however the performance is not great tho.
 (Mostly because zink loves to create tons of pipelines, when creating and destroying
 pipelines are actually quite expensive in qualcomm's driver)
 
+## Requirements
+ - A copy of compatible qualcomm proprietary driver
+ - vulkan loader
+ - [leegao/bcn_layer](https://github.com/leegao/bcn_layer) (Not sure if it's actually needed, but I'm not gonna trust qualcomm on handling the BCn textures)
+ - mesa built with zink support if you want to use zink with it
+
 ## Compatible driver versions
 I'm not sure if the EULA of qualcomm's drivers allows me to redistribute the binaries
 (probably not) and if it even allow me to share the url of drivers, but I assume not.
@@ -37,7 +43,9 @@ So I'll only provided those versions that works with this wsi layer:
 | 260304 | qcom-adreno_1.855.2_armv8a.tar.gz | `8e0b463519321613fa96f057c7cd7f67fd72b22dd0feb3129ffaab1400f17065` | |
 
 All these driver versions work well with this layer, with very minor unnoticeable
-lag and tested, with no major glitches spotted.
+lag. They are tested with no major glitches spotted.
+Usually you would assume newer drivers provide better performance but 
+qualcomm doesnt behave like this. For older devices older versions tend to work better.
 
 There are also some other versions that will work with this layer and can run
 vkmark and other normal vulkan programs, but will have some weird glitches with zink.
@@ -49,7 +57,7 @@ number to document the driver version in this range) and 250119-260609(these are
 file upload dates on their drivers) However there might be some drivers I havent tested,
 if u found one that works then feel free to create an issue and report it here.
 
-To run these drivers, you'll need [msm_drm_gbm](https://git.codelinaro.org/clo/le/display/libgbm/), in the branch `display.qclinux.1.0.r1-rel`
+To run these drivers, you'll need [msm_drm_gbm](https://git.codelinaro.org/clo/le/display/libgbm/), with the branch `display.qclinux.1.0.r1-rel`
 
 ## Tested environment
 Tested with mesa zink 25.2.5, 26.1.2, 26.2.0-dev, in Arch Linux(running in LXC)
