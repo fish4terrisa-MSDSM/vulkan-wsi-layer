@@ -59,6 +59,8 @@ if u found one that works then feel free to create an issue and report it here.
 
 To run these drivers, you'll need [msm_drm_gbm](https://git.codelinaro.org/clo/le/display/libgbm/), with the branch `display.qclinux.1.0.r1-rel`
 
+(If you dont know where to find them, check the Termux discord or meta-qcom)
+
 ## Tested environment
 Tested with mesa zink 25.2.5, 26.1.2, 26.2.0-dev, in Arch Linux(running in LXC)
 on a device with Adreno 740.
