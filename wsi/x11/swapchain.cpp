@@ -181,12 +181,34 @@ VkResult swapchain::create_swapchain_image(VkImageCreateInfo image_create_info, 
    image_data->device = m_device;
    image_data->device_data = &m_device_data;
 
+   // FAST PATH: Try LINEAR first to bypass the heavy optimal-to-linear copy
+   VkImageCreateInfo linear_info = image_create_info;
+   linear_info.tiling = VK_IMAGE_TILING_LINEAR;
+   linear_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+   // Essential hack to disable UBWC bugs
+   linear_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
+
+   VkExternalMemoryImageCreateInfoKHR ext_info = {};
+   ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
+   ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+   ext_info.pNext = linear_info.pNext;
+   linear_info.pNext = &ext_info;
+
+   VkResult res = m_device_data.disp.CreateImage(m_device, &linear_info, get_allocation_callbacks(), &image_data->linear_image);
+   if (res == VK_SUCCESS) {
+      // Fast path succeeded: No need for an optimal image copy buffer
+      image_data->optimal_image = VK_NULL_HANDLE;
+      image.image = image_data->linear_image;
+      m_image_create_info = linear_info;
+      return VK_SUCCESS;
+   }
+
+   // SLOW PATH: Fallback to OPTIMAL + copy if driver strictly refuses LINEAR color attachments
    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
    image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
    image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
 
-   VkResult res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
+   res = m_device_data.disp.CreateImage(m_device, &image_create_info, get_allocation_callbacks(), &image.image);
    if (res != VK_SUCCESS) {
       WSI_LOG_ERROR("Failed to create optimal swapchain image");
       return res;
@@ -205,206 +227,263 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
    auto image_data = static_cast<x11_image_data *>(image.data);
    image_status_lock.unlock();
 
-   VkMemoryRequirements reqs;
-   m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->optimal_image, &reqs);
+   VkResult res;
 
-   VkPhysicalDeviceMemoryProperties mem_props;
-   m_device_data.instance_data.disp.GetPhysicalDeviceMemoryProperties(m_device_data.physical_device, &mem_props);
-   uint32_t mem_type_idx = UINT32_MAX;
-   for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-      if ((reqs.memoryTypeBits & (1 << i)) && 
-          (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-         mem_type_idx = i;
-         break;
-      }
-   }
-   if (mem_type_idx == UINT32_MAX) {
+   if (image_data->optimal_image != VK_NULL_HANDLE) {
+      // SLOW PATH: Setup OPTIMAL and LINEAR images, and a heavy copy command buffer
+      VkMemoryRequirements reqs;
+      m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->optimal_image, &reqs);
+
+      VkPhysicalDeviceMemoryProperties mem_props;
+      m_device_data.instance_data.disp.GetPhysicalDeviceMemoryProperties(m_device_data.physical_device, &mem_props);
+      uint32_t mem_type_idx = UINT32_MAX;
       for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-         if (reqs.memoryTypeBits & (1 << i)) {
+         if ((reqs.memoryTypeBits & (1 << i)) && 
+             (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
             mem_type_idx = i;
             break;
          }
       }
-   }
+      if (mem_type_idx == UINT32_MAX) {
+         for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+            if (reqs.memoryTypeBits & (1 << i)) {
+               mem_type_idx = i;
+               break;
+            }
+         }
+      }
 
-   VkMemoryAllocateInfo mem_info = {};
-   mem_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-   mem_info.allocationSize = reqs.size;
-   mem_info.memoryTypeIndex = mem_type_idx;
+      VkMemoryAllocateInfo mem_info = {};
+      mem_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+      mem_info.allocationSize = reqs.size;
+      mem_info.memoryTypeIndex = mem_type_idx;
 
-   VkResult res = m_device_data.disp.AllocateMemory(m_device, &mem_info, get_allocation_callbacks(), &image_data->optimal_memory);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to allocate memory for optimal image");
-      return res;
-   }
-
-   res = m_device_data.disp.BindImageMemory(m_device, image_data->optimal_image, image_data->optimal_memory, 0);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to bind memory to optimal image");
-      return res;
-   }
-
-   VkImageCreateInfo linear_info = image_create_info;
-   linear_info.tiling = VK_IMAGE_TILING_LINEAR;
-   linear_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-
-   VkExternalMemoryImageCreateInfoKHR ext_info = {};
-   ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
-   ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-   ext_info.pNext = linear_info.pNext;
-   linear_info.pNext = &ext_info;
-
-   res = m_device_data.disp.CreateImage(m_device, &linear_info, get_allocation_callbacks(), &image_data->linear_image);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to create linear presentation image");
-      return res;
-   }
-
-   VkMemoryRequirements linear_reqs;
-   m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->linear_image, &linear_reqs);
-
-   int dma_buf_fd = alloc_dma_heap(linear_reqs.size);
-   if (dma_buf_fd < 0) {
-      WSI_LOG_ERROR("Failed to allocate DMA heap memory");
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-
-   image_data->external_mem.set_buffer_fds({dma_buf_fd, -1, -1, -1});
-   image_data->external_mem.set_num_memories(1);
-   image_data->external_mem.set_format_info(false, 1);
-   image_data->external_mem.set_memory_handle_type(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
-
-   res = image_data->external_mem.import_memory_and_bind_swapchain_image(image_data->linear_image);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to import memory and bind linear image");
-      return res;
-   }
-
-   VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
-   VkSubresourceLayout layout;
-   m_device_data.disp.GetImageSubresourceLayout(m_device, image_data->linear_image, &subres, &layout);
-
-   uint32_t width = image_create_info.extent.width;
-   uint32_t height = image_create_info.extent.height;
-   uint32_t stride = layout.rowPitch;
-   uint32_t fourcc = util::drm::vk_to_drm_format(image_create_info.format);
-   if (!fourcc) fourcc = 0x34325241;
-
-   int depth = 24;
-   uint32_t dummy_w, dummy_h;
-   m_wsi_surface->get_size_and_depth(&dummy_w, &dummy_h, &depth);
-
-   res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to create DRI3 image resources");
-      return res;
-   }
-
-   auto present_fence = fence_sync::create(m_device_data);
-   if (!present_fence.has_value())
-   {
-      WSI_LOG_ERROR("Failed to create presentation fence");
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-   image_data->present_fence = std::move(present_fence.value());
-
-   if (m_command_pool == VK_NULL_HANDLE) {
-      VkCommandPoolCreateInfo pool_info = {};
-      pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-      pool_info.queueFamilyIndex = 0;
-      pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-      res = m_device_data.disp.CreateCommandPool(m_device, &pool_info, get_allocation_callbacks(), &m_command_pool);
+      res = m_device_data.disp.AllocateMemory(m_device, &mem_info, get_allocation_callbacks(), &image_data->optimal_memory);
       if (res != VK_SUCCESS) {
-         WSI_LOG_ERROR("Failed to create command pool");
+         WSI_LOG_ERROR("Failed to allocate memory for optimal image");
          return res;
       }
-   }
 
-   VkCommandBufferAllocateInfo cmd_alloc = {};
-   cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-   cmd_alloc.commandPool = m_command_pool;
-   cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-   cmd_alloc.commandBufferCount = 1;
-   res = m_device_data.disp.AllocateCommandBuffers(m_device, &cmd_alloc, &image_data->copy_cmd);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to allocate copy command buffer");
-      return res;
-}
+      res = m_device_data.disp.BindImageMemory(m_device, image_data->optimal_image, image_data->optimal_memory, 0);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to bind memory to optimal image");
+         return res;
+      }
 
-   VkCommandBufferBeginInfo begin_info = {};
-   begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-   res = m_device_data.disp.BeginCommandBuffer(image_data->copy_cmd, &begin_info);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to begin command buffer");
-      return res;
-   }
+      VkImageCreateInfo linear_info = image_create_info;
+      linear_info.tiling = VK_IMAGE_TILING_LINEAR;
+      linear_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-   VkImageMemoryBarrier barrier_src = {};
-   barrier_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-   barrier_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-   barrier_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-   barrier_src.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-   barrier_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-   barrier_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier_src.image = image_data->optimal_image;
-   barrier_src.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+      VkExternalMemoryImageCreateInfoKHR ext_info = {};
+      ext_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
+      ext_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      ext_info.pNext = linear_info.pNext;
+      linear_info.pNext = &ext_info;
 
-   VkImageMemoryBarrier barrier_dst = {};
-   barrier_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-   barrier_dst.srcAccessMask = 0;
-   barrier_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-   barrier_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-   barrier_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-   barrier_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-   barrier_dst.image = image_data->linear_image;
-   barrier_dst.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+      res = m_device_data.disp.CreateImage(m_device, &linear_info, get_allocation_callbacks(), &image_data->linear_image);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to create linear presentation image");
+         return res;
+      }
 
-   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
-                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                         0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+      VkMemoryRequirements linear_reqs;
+      m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->linear_image, &linear_reqs);
 
-   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
-                                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                         0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+      int dma_buf_fd = alloc_dma_heap(linear_reqs.size);
+      if (dma_buf_fd < 0) {
+         WSI_LOG_ERROR("Failed to allocate DMA heap memory");
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
 
-   VkImageCopy copy_region = {};
-   copy_region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-   copy_region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-   copy_region.extent = { width, height, 1 };
+      image_data->external_mem.set_buffer_fds({dma_buf_fd, -1, -1, -1});
+      image_data->external_mem.set_num_memories(1);
+      image_data->external_mem.set_format_info(false, 1);
+      image_data->external_mem.set_memory_handle_type(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
 
-   m_device_data.disp.CmdCopyImage(image_data->copy_cmd,
-                                   image_data->optimal_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                   image_data->linear_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   1, &copy_region);
+      res = image_data->external_mem.import_memory_and_bind_swapchain_image(image_data->linear_image);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to import memory and bind linear image");
+         return res;
+      }
 
-   barrier_src.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-   barrier_src.dstAccessMask = 0;
-   barrier_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-   barrier_src.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+      VkSubresourceLayout layout;
+      m_device_data.disp.GetImageSubresourceLayout(m_device, image_data->linear_image, &subres, &layout);
 
-   barrier_dst.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-   barrier_dst.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-   barrier_dst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-   barrier_dst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+      uint32_t width = image_create_info.extent.width;
+      uint32_t height = image_create_info.extent.height;
+      uint32_t stride = layout.rowPitch;
+      uint32_t fourcc = util::drm::vk_to_drm_format(image_create_info.format);
+      if (!fourcc) fourcc = 0x34325241;
 
-   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
-                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                         0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+      int depth = 24;
+      uint32_t dummy_w, dummy_h;
+      m_wsi_surface->get_size_and_depth(&dummy_w, &dummy_h, &depth);
 
-   m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
-                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                         0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+      res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to create DRI3 image resources");
+         return res;
+      }
 
-   res = m_device_data.disp.EndCommandBuffer(image_data->copy_cmd);
-   if (res != VK_SUCCESS) {
-      WSI_LOG_ERROR("Failed to end command buffer");
-      return res;
+      auto present_fence = fence_sync::create(m_device_data);
+      if (!present_fence.has_value())
+      {
+         WSI_LOG_ERROR("Failed to create presentation fence");
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      image_data->present_fence = std::move(present_fence.value());
+
+      if (m_command_pool == VK_NULL_HANDLE) {
+         VkCommandPoolCreateInfo pool_info = {};
+         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+         pool_info.queueFamilyIndex = 0;
+         pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+         res = m_device_data.disp.CreateCommandPool(m_device, &pool_info, get_allocation_callbacks(), &m_command_pool);
+         if (res != VK_SUCCESS) {
+            WSI_LOG_ERROR("Failed to create command pool");
+            return res;
+         }
+      }
+
+      VkCommandBufferAllocateInfo cmd_alloc = {};
+      cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+      cmd_alloc.commandPool = m_command_pool;
+      cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      cmd_alloc.commandBufferCount = 1;
+      res = m_device_data.disp.AllocateCommandBuffers(m_device, &cmd_alloc, &image_data->copy_cmd);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to allocate copy command buffer");
+         return res;
+      }
+
+      VkCommandBufferBeginInfo begin_info = {};
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      res = m_device_data.disp.BeginCommandBuffer(image_data->copy_cmd, &begin_info);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to begin command buffer");
+         return res;
+      }
+
+      VkImageMemoryBarrier barrier_src = {};
+      barrier_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      barrier_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      barrier_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      barrier_src.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      barrier_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      barrier_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier_src.image = image_data->optimal_image;
+      barrier_src.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      VkImageMemoryBarrier barrier_dst = {};
+      barrier_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      barrier_dst.srcAccessMask = 0;
+      barrier_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barrier_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      barrier_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      barrier_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier_dst.image = image_data->linear_image;
+      barrier_dst.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+
+      m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+
+      VkImageCopy copy_region = {};
+      copy_region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+      copy_region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+      copy_region.extent = { width, height, 1 };
+
+      m_device_data.disp.CmdCopyImage(image_data->copy_cmd,
+                                      image_data->optimal_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                      image_data->linear_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      1, &copy_region);
+
+      barrier_src.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      barrier_src.dstAccessMask = 0;
+      barrier_src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      barrier_src.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+      barrier_dst.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      barrier_dst.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+      barrier_dst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      barrier_dst.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+      m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                            0, 0, nullptr, 0, nullptr, 1, &barrier_src);
+
+      m_device_data.disp.CmdPipelineBarrier(image_data->copy_cmd,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                            0, 0, nullptr, 0, nullptr, 1, &barrier_dst);
+
+      res = m_device_data.disp.EndCommandBuffer(image_data->copy_cmd);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to end command buffer");
+         return res;
+      }
+   } else {
+      // FAST PATH: Direct DMA Heap bind to our LINEAR image, entirely skipping the copy setup
+      VkMemoryRequirements linear_reqs;
+      m_device_data.disp.GetImageMemoryRequirements(m_device, image_data->linear_image, &linear_reqs);
+
+      int dma_buf_fd = alloc_dma_heap(linear_reqs.size);
+      if (dma_buf_fd < 0) {
+         WSI_LOG_ERROR("Failed to allocate DMA heap memory");
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+
+      image_data->external_mem.set_buffer_fds({dma_buf_fd, -1, -1, -1});
+      image_data->external_mem.set_num_memories(1);
+      image_data->external_mem.set_format_info(false, 1);
+      image_data->external_mem.set_memory_handle_type(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+
+      res = image_data->external_mem.import_memory_and_bind_swapchain_image(image_data->linear_image);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to import memory and bind linear image");
+         return res;
+      }
+
+      VkImageSubresource subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+      VkSubresourceLayout layout;
+      m_device_data.disp.GetImageSubresourceLayout(m_device, image_data->linear_image, &subres, &layout);
+
+      uint32_t width = image_create_info.extent.width;
+      uint32_t height = image_create_info.extent.height;
+      uint32_t stride = layout.rowPitch;
+      uint32_t fourcc = util::drm::vk_to_drm_format(image_create_info.format);
+      if (!fourcc) fourcc = 0x34325241;
+
+      int depth = 24;
+      uint32_t dummy_w, dummy_h;
+      m_wsi_surface->get_size_and_depth(&dummy_w, &dummy_h, &depth);
+
+      res = m_dri3_presenter->create_image_resources(image_data, width, height, depth, stride, fourcc, 1274);
+      if (res != VK_SUCCESS) {
+         WSI_LOG_ERROR("Failed to create DRI3 image resources");
+         return res;
+      }
+
+      auto present_fence = fence_sync::create(m_device_data);
+      if (!present_fence.has_value())
+      {
+         WSI_LOG_ERROR("Failed to create presentation fence");
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      image_data->present_fence = std::move(present_fence.value());
+
+      // Because there is only one image, there is absolutely no need to copy
+      image_data->copy_cmd = VK_NULL_HANDLE; 
    }
 
    return VK_SUCCESS;
@@ -530,7 +609,8 @@ void swapchain::destroy_image(wsi::swapchain_image &image)
          m_dri3_presenter->destroy_image_resources(data);
       }
 
-      if (data->linear_image != VK_NULL_HANDLE) {
+      // In the fast path optimal_image is NULL, so linear_image is destroyed by the base class logic above safely.
+      if (data->optimal_image != VK_NULL_HANDLE && data->linear_image != VK_NULL_HANDLE) {
          m_device_data.disp.DestroyImage(m_device, data->linear_image, get_allocation_callbacks());
          data->linear_image = VK_NULL_HANDLE;
       }
@@ -579,7 +659,12 @@ VkResult swapchain::bind_swapchain_image(VkDevice &device, const VkBindImageMemo
    if (image_data == nullptr) {
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
-   return device_data.disp.BindImageMemory(device, bind_image_mem_info->image, image_data->optimal_memory, 0);
+   
+   if (image_data->optimal_image != VK_NULL_HANDLE) {
+      return device_data.disp.BindImageMemory(device, bind_image_mem_info->image, image_data->optimal_memory, 0);
+   } else {
+      return image_data->external_mem.bind_swapchain_image_memory(bind_image_mem_info->image);
+   }
 }
 
 VkResult swapchain::add_required_extensions(VkDevice device, const VkSwapchainCreateInfoKHR *swapchain_create_info)
