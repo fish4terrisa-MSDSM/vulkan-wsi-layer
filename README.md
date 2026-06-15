@@ -25,6 +25,7 @@ This wsi layer works well with zink, however the performance is not great tho.
 pipelines are actually quite expensive in qualcomm's driver)
 
 ## Requirements
+ - Access to `/dev/dma_heap/system` or `/dev/ion`(experimental, not much tested)
  - A copy of compatible qualcomm proprietary driver
  - vulkan loader
  - [leegao/bcn_layer](https://github.com/leegao/bcn_layer) (Not sure if it's actually needed, but I'm not gonna trust qualcomm on handling the BCn textures)
@@ -99,7 +100,8 @@ If you tested it on your device and it works, then feel free to open an issue to
 this discovery so we can have better document about it.
 - Does it work with proot or chroot?
 
-Proot? I'm not so sure. If you have access to `/dev/dma_heap/system` then it should work.
+Proot? I'm not so sure. If you have access to `/dev/dma_heap/system`(or `/dev/ion`)
+then it should work.
 Chroot should work since I'm testing it with LXC, which is kinda like a fancy chroot with
 namespace.
 - How's the performance compared with Turnip?
@@ -127,7 +129,7 @@ it's not like that big of an issue for now.
 - But why when we already have Turnip for Adreno devices?
 
 You see qualcomm's driver actually does offer quite the performance some versions of Turnip
-drivers doesnt offer. It's also better to have multiple choices so when Turnip broke
+drivers dont offer. It's also better to have multiple choices so when Turnip broke
 something you rely on u can have something to switch to.
 Also it's cool.
 - You used AI in this??? UNFORGIVABLE!!! YOU SHOULD GO TO HELL!
