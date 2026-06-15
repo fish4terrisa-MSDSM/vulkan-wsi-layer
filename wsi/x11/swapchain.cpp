@@ -1,3 +1,12 @@
+#include "swapchain.hpp"
+#include "util/log.hpp"
+#include "util/macros.hpp"
+#include "wsi/external_memory.hpp"
+#include "wsi/swapchain_base.hpp"
+#include "wsi/extensions/present_id.hpp"
+#include "dri3_presenter.hpp"
+#include "util/drm/drm_utils.hpp"
+
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -8,23 +17,143 @@
 #include <linux/dma-heap.h>
 #include <algorithm>
 #include <poll.h>
+#include <sys/mman.h>
+#include <atomic>
 
-#include <util/timed_semaphore.hpp>
-#include <vulkan/vulkan_core.h>
+#define ION_IOC_MAGIC 'I'
 
-#include <xcb/dri3.h>
-#include <xcb/xcb.h>
-#include <xcb/xproto.h>
-#include <xcb/present.h>
+struct local_ion_allocation_data {
+    uint64_t len;
+    uint32_t heap_id_mask;
+    uint32_t flags;
+    uint32_t fd;
+    uint32_t unused;
+};
 
-#include "swapchain.hpp"
-#include "util/log.hpp"
-#include "util/macros.hpp"
-#include "wsi/external_memory.hpp"
-#include "wsi/swapchain_base.hpp"
-#include "wsi/extensions/present_id.hpp"
-#include "dri3_presenter.hpp"
-#include "util/drm/drm_utils.hpp"
+#define LOCAL_ION_IOC_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct local_ion_allocation_data)
+
+struct local_ion_heap_data {
+    char name[32];
+    uint32_t type;
+    uint32_t heap_id;
+    uint32_t reserved0;
+    uint32_t reserved1;
+    uint32_t reserved2;
+};
+
+struct local_ion_heap_query {
+    uint32_t cnt;
+    uint32_t reserved0;
+    uint64_t heaps;
+    uint32_t reserved1;
+    uint32_t reserved2;
+};
+
+#define LOCAL_ION_IOC_HEAP_QUERY _IOWR(ION_IOC_MAGIC, 8, struct local_ion_heap_query)
+#define LOCAL_ION_HEAP_TYPE_DMA 4
+#define LOCAL_ION_NUM_HEAP_IDS 32
+
+enum class AllocatorType {
+    UNDECIDED,
+    DMA_HEAP,
+    ION,
+    FAILED
+};
+
+static std::atomic<AllocatorType> g_allocator_type{ AllocatorType::UNDECIDED };
+
+static int find_ion_alloc_heap_id(int fd)
+{
+   struct local_ion_heap_data heaps[LOCAL_ION_NUM_HEAP_IDS];
+   struct local_ion_heap_query query = {
+      .cnt = LOCAL_ION_NUM_HEAP_IDS,
+      .heaps = (uint64_t)(uintptr_t)heaps,
+   };
+
+   int ret = ioctl(fd, LOCAL_ION_IOC_HEAP_QUERY, &query);
+   if (ret < 0)
+   {
+      return -1;
+   }
+
+   int alloc_heap_id = -1;
+   // Seek DMA heap
+   for (uint32_t i = 0; i < query.cnt; ++i)
+   {
+      if (heaps[i].type == LOCAL_ION_HEAP_TYPE_DMA)
+      {
+         alloc_heap_id = heaps[i].heap_id;
+         break;
+      }
+   }
+
+   // Fallback to SYSTEM heap
+   if (alloc_heap_id == -1)
+   {
+      for (uint32_t i = 0; i < query.cnt; ++i)
+      {
+         if (heaps[i].type == 0) // ION_HEAP_TYPE_SYSTEM
+         {
+            alloc_heap_id = heaps[i].heap_id;
+            break;
+         }
+      }
+   }
+
+   // Fallback to first available heap
+   if (alloc_heap_id == -1 && query.cnt > 0)
+   {
+      alloc_heap_id = heaps[0].heap_id;
+   }
+
+   return alloc_heap_id;
+}
+
+static int alloc_dma_heap_internal(size_t aligned_size) {
+    int fd = open("/dev/dma_heap/system", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct dma_heap_allocation_data heap_data = {};
+    heap_data.len = aligned_size;
+    heap_data.fd_flags = O_RDWR | O_CLOEXEC;
+
+    int ret = ioctl(fd, DMA_HEAP_IOCTL_ALLOC, &heap_data);
+    close(fd);
+    if (ret != 0) {
+        return -1;
+    }
+    return heap_data.fd;
+}
+
+static int alloc_ion_internal(size_t aligned_size) {
+    int fd = open("/dev/ion", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fd = open("/dev/ion", O_RDWR | O_CLOEXEC);
+    }
+    if (fd < 0) {
+        return -1;
+    }
+
+    int heap_id = find_ion_alloc_heap_id(fd);
+    if (heap_id < 0) {
+        close(fd);
+        return -1;
+    }
+
+    struct local_ion_allocation_data alloc = {};
+    alloc.len = aligned_size;
+    alloc.heap_id_mask = 1u << heap_id;
+    alloc.flags = 0;
+
+    int ret = ioctl(fd, LOCAL_ION_IOC_ALLOC, &alloc);
+    close(fd);
+    if (ret < 0) {
+        return -1;
+    }
+    return alloc.fd;
+}
 
 namespace wsi
 {
@@ -32,12 +161,6 @@ namespace x11
 {
 
 static int alloc_dma_heap(size_t size) {
-    int fd = open("/dev/dma_heap/system", O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        WSI_LOG_ERROR("Failed to open /dev/dma_heap/system");
-        return -1;
-    }
-
     /* DMA-BUF system heaps on Android strictly require the allocation length
      * to be page-aligned. Unaligned sizes trigger EINVAL inside the ioctl. */
     size_t page_size = 4096;
@@ -47,17 +170,40 @@ static int alloc_dma_heap(size_t size) {
     }
     size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
 
-    struct dma_heap_allocation_data heap_data = {};
-    heap_data.len = aligned_size;
-    heap_data.fd_flags = O_RDWR | O_CLOEXEC;
+    AllocatorType current_type = g_allocator_type.load(std::memory_order_relaxed);
 
-    int ret = ioctl(fd, DMA_HEAP_IOCTL_ALLOC, &heap_data);
-    close(fd);
-    if (ret != 0) {
-        WSI_LOG_ERROR("DMA_HEAP_IOCTL_ALLOC failed, size: %zu, aligned: %zu, errno: %d", size, aligned_size, errno);
+    if (current_type == AllocatorType::DMA_HEAP) {
+        int fd = alloc_dma_heap_internal(aligned_size);
+        if (fd >= 0) return fd;
+        current_type = AllocatorType::UNDECIDED;
+    } else if (current_type == AllocatorType::ION) {
+        int fd = alloc_ion_internal(aligned_size);
+        if (fd >= 0) return fd;
+        current_type = AllocatorType::UNDECIDED;
+    } else if (current_type == AllocatorType::FAILED) {
         return -1;
     }
-    return heap_data.fd;
+
+    if (current_type == AllocatorType::UNDECIDED) {
+        // Try DMA Heap first
+        int fd = alloc_dma_heap_internal(aligned_size);
+        if (fd >= 0) {
+            g_allocator_type.store(AllocatorType::DMA_HEAP, std::memory_order_relaxed);
+            return fd;
+        }
+
+        // Try ION fallback
+        fd = alloc_ion_internal(aligned_size);
+        if (fd >= 0) {
+            g_allocator_type.store(AllocatorType::ION, std::memory_order_relaxed);
+            return fd;
+        }
+
+        g_allocator_type.store(AllocatorType::FAILED, std::memory_order_relaxed);
+        WSI_LOG_ERROR("x11 swapchain: Failed to allocate DMA buffer from both dma_heap and ION");
+    }
+
+    return -1;
 }
 
 swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCallbacks *pAllocator,
@@ -291,7 +437,7 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
 
       int dma_buf_fd = alloc_dma_heap(linear_reqs.size);
       if (dma_buf_fd < 0) {
-         WSI_LOG_ERROR("Failed to allocate DMA heap memory");
+         WSI_LOG_ERROR("Failed to allocate DMA memory");
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
 
